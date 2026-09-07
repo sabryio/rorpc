@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "inspector"
 path = "src/bin/inspector.rs"
 
+[features]
+default = []
+better-auth-integration = ["dep:better-auth", "dep:sea-orm"]
+
 [dependencies]
 axum = { version = "0.8.9", features = ["macros"] }
 tokio = { version = "1.53.1", features = ["full"] }
@@ -21,7 +25,7 @@ serde_json = "1"
 tower = "0.5"
 tower-http = { version = "0.7.1", features = ["cors"] }
 futures = "0.3"
-better-auth = { version = "1.0.0-alpha.2", features = ["axum", "seaorm2"] }
+better-auth = { version = "1.0.0-alpha.2", features = ["axum", "seaorm2"], optional = true }
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = [
     "sqlx-sqlite",
     "runtime-tokio",
@@ -29,7 +33,7 @@ sea-orm = { version = "2.0.0-rc.37", default-features = false, features = [
     "with-chrono",
     "with-json",
     "with-uuid",
-] }
+], optional = true }
 
 # Utilities
 chrono = "0.4"

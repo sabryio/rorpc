@@ -1,5 +1,14 @@
+//! Axum server example with optional Better Auth integration
+//!
+//! By default, runs without authentication. Enable with:
+//! ```bash
+//! cargo run --bin server --features better-auth-integration
+//! ```
+
+#[cfg(feature = "better-auth-integration")]
 mod auth_schema;
 
+#[cfg(feature = "better-auth-integration")]
 use auth_schema::AppAuthSchema;
 use axum::{
     http::StatusCode,
@@ -8,6 +17,7 @@ use axum::{
     routing::post,
     Router,
 };
+#[cfg(feature = "better-auth-integration")]
 use better_auth::{
     integrations::axum::{AxumIntegration, CurrentSession, OptionalSession},
     plugins::{EmailPasswordPlugin, SessionManagementPlugin},
@@ -23,14 +33,23 @@ use tower_http::cors::CorsLayer;
 
 // ===== State =====
 
+#[cfg(feature = "better-auth-integration")]
 #[derive(Clone)]
 struct AppState {
     planets: Arc<Vec<Planet>>,
     auth: Arc<BetterAuth<AppAuthSchema>>,
 }
 
+#[cfg(not(feature = "better-auth-integration"))]
+#[derive(Clone)]
+struct AppState {
+    planets: Arc<Vec<Planet>>,
+}
+
+#[cfg(feature = "better-auth-integration")]
 use axum::extract::FromRef;
 
+#[cfg(feature = "better-auth-integration")]
 impl FromRef<AppState> for Arc<BetterAuth<AppAuthSchema>> {
     fn from_ref(state: &AppState) -> Self {
         state.auth.clone()
@@ -111,6 +130,7 @@ impl IntoResponse for RpcError {
 
 // ===== Handlers =====
 
+#[cfg(feature = "better-auth-integration")]
 async fn ping(session: OptionalSession<AppAuthSchema>) -> Json<String> {
     match session.0 {
         Some(s) => Json(format!(
@@ -121,6 +141,12 @@ async fn ping(session: OptionalSession<AppAuthSchema>) -> Json<String> {
     }
 }
 
+#[cfg(not(feature = "better-auth-integration"))]
+async fn ping() -> Json<String> {
+    Json("pong".to_string())
+}
+
+#[cfg(feature = "better-auth-integration")]
 async fn list_planets(
     axum::extract::State(state): axum::extract::State<AppState>,
     _session: OptionalSession<AppAuthSchema>,
@@ -128,6 +154,14 @@ async fn list_planets(
     Json(state.planets.to_vec())
 }
 
+#[cfg(not(feature = "better-auth-integration"))]
+async fn list_planets(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Json<Vec<Planet>> {
+    Json(state.planets.to_vec())
+}
+
+#[cfg(feature = "better-auth-integration")]
 async fn list_planets_paginated(
     axum::extract::State(state): axum::extract::State<AppState>,
     _session: OptionalSession<AppAuthSchema>,
@@ -152,6 +186,31 @@ async fn list_planets_paginated(
     })
 }
 
+#[cfg(not(feature = "better-auth-integration"))]
+async fn list_planets_paginated(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(input): Json<ListPlanetsPaginatedInput>,
+) -> Json<ListPlanetsPaginatedOutput> {
+    let offset = input.offset.unwrap_or(0);
+    let items: Vec<Planet> = state
+        .planets
+        .iter()
+        .skip(offset)
+        .take(input.limit)
+        .cloned()
+        .collect();
+    let next_page_param = if offset + input.limit < state.planets.len() {
+        Some(offset + input.limit)
+    } else {
+        None
+    };
+    Json(ListPlanetsPaginatedOutput {
+        items,
+        next_page_param,
+    })
+}
+
+#[cfg(feature = "better-auth-integration")]
 async fn find_planet(
     axum::extract::State(state): axum::extract::State<AppState>,
     _session: OptionalSession<AppAuthSchema>,
@@ -166,6 +225,21 @@ async fn find_planet(
         .ok_or_else(|| RpcError::not_found(format!("Planet with id {} not found", input.id)))
 }
 
+#[cfg(not(feature = "better-auth-integration"))]
+async fn find_planet(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(input): Json<FindPlanetInput>,
+) -> Result<Json<Planet>, RpcError> {
+    state
+        .planets
+        .iter()
+        .find(|p| p.id == input.id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| RpcError::not_found(format!("Planet with id {} not found", input.id)))
+}
+
+#[cfg(feature = "better-auth-integration")]
 async fn create_planet(
     axum::extract::State(state): axum::extract::State<AppState>,
     // CurrentSession rejects the request automatically if not signed in
@@ -174,6 +248,27 @@ async fn create_planet(
 ) -> Result<Json<Planet>, RpcError> {
     let _user = session.user;
 
+    if input.name.trim().is_empty() {
+        return Err(RpcError::bad_request("Planet name cannot be empty"));
+    }
+    if input.name.len() > 100 {
+        return Err(RpcError::internal_error(
+            "Planet name too long (max 100 characters)",
+        ));
+    }
+
+    Ok(Json(Planet {
+        id: state.planets.len() as i32 + 1,
+        name: input.name,
+        description: input.description,
+    }))
+}
+
+#[cfg(not(feature = "better-auth-integration"))]
+async fn create_planet(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(input): Json<CreatePlanetInput>,
+) -> Result<Json<Planet>, RpcError> {
     if input.name.trim().is_empty() {
         return Err(RpcError::bad_request("Planet name cannot be empty"));
     }
@@ -322,8 +417,11 @@ fn sample_planets() -> Vec<Planet> {
     ]
 }
 
+#[cfg(feature = "better-auth-integration")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🚀 Starting server with Better Auth integration...");
+    
     let database = Database::connect("sqlite::memory:").await?;
     auth_schema::run_app_migrations(&database).await?;
 
@@ -403,6 +501,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   POST /rpc/planet/list-paginated (public)");
     println!("   POST /rpc/planet/find           (public)");
     println!("   POST /rpc/planet/create         (requires auth)");
+    println!("   POST /rpc/stream                (public)");
+    println!("   POST /rpc/stream-async          (public)");
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+#[cfg(not(feature = "better-auth-integration"))]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🚀 Starting server without authentication");
+    println!("💡 To enable Better Auth, run: cargo run --bin server --features better-auth-integration");
+    
+    let state = AppState {
+        planets: Arc::new(sample_planets()),
+    };
+
+    let rpc_router = Router::new()
+        .route("/ping", post(ping))
+        .route("/planet/list", post(list_planets))
+        .route("/planet/list-paginated", post(list_planets_paginated))
+        .route("/planet/find", post(find_planet))
+        .route("/planet/create", post(create_planet))
+        .route("/stream", post(stream_events))
+        .route("/stream-async", post(stream_async));
+
+    let app = Router::new()
+        .nest("/rpc", rpc_router)
+        .with_state(state)
+        .layer(
+            CorsLayer::new()
+                .allow_origin([
+                    "http://localhost:3000".parse::<axum::http::HeaderValue>()?,
+                    "http://127.0.0.1:3000".parse::<axum::http::HeaderValue>()?,
+                    "http://localhost:5173".parse::<axum::http::HeaderValue>()?,
+                    "http://127.0.0.1:5173".parse::<axum::http::HeaderValue>()?,
+                ])
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::ACCEPT,
+                ])
+                .allow_credentials(true),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await?;
+
+    println!();
+    println!("🚀 Server running on http://127.0.0.1:3001");
+    println!();
+    println!("🔧 oRPC  (under /rpc):");
+    println!("   POST /rpc/ping                  (public)");
+    println!("   POST /rpc/planet/list           (public)");
+    println!("   POST /rpc/planet/list-paginated (public)");
+    println!("   POST /rpc/planet/find           (public)");
+    println!("   POST /rpc/planet/create         (public - no auth)");
     println!("   POST /rpc/stream                (public)");
     println!("   POST /rpc/stream-async          (public)");
 

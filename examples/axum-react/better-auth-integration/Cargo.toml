@@ -6,6 +6,10 @@ edition = "2021"
 [package.metadata.rorpc]
 client_path = "../client/src/rpc/bindings.ts"
 
+[features]
+default = []
+better-auth-integration = ["dep:better-auth"]
+
 [dependencies]
 # Core
 tokio = { version = "1.53", features = ["full"] }
@@ -20,8 +24,8 @@ tower-http = { version = "0.7", features = ["cors"] }
 # rorpc
 rorpc = { workspace = true }
 
-# Better Auth RS (using alpha version)
-better-auth = { version = "1.0.0-alpha.2", features = ["axum", "seaorm2"] }
+# Better Auth RS (using alpha version) - optional feature
+better-auth = { version = "1.0.0-alpha.2", features = ["axum", "seaorm2"], optional = true }
 
 # Utilities
 chrono = "0.4"
