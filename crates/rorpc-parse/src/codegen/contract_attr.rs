@@ -47,6 +47,9 @@ impl Parse for ContractArgs {
 /// Called at macro expansion time. Returns `Some(absolute_path)` if the key is
 /// present, `None` otherwise. The relative path is resolved against
 /// `CARGO_MANIFEST_DIR` so `output()` always receives an absolute path.
+///
+/// Canonicalizes the path to resolve `..` components, enabling paths like
+/// `"../../../../frontend/src/rpc/bindings.ts"` when frontend is outside the Rust workspace.
 fn read_metadata_client_path() -> Option<String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let cargo_toml_path = std::path::Path::new(&manifest_dir).join("Cargo.toml");
@@ -60,9 +63,14 @@ fn read_metadata_client_path() -> Option<String> {
         .get("client_path")?
         .as_str()?;
 
-    // Resolve relative to CARGO_MANIFEST_DIR — output() requires an absolute path
-    let absolute = std::path::Path::new(&manifest_dir)
-        .join(client_path)
+    // Resolve relative to CARGO_MANIFEST_DIR, then canonicalize to resolve .. components
+    let resolved = std::path::Path::new(&manifest_dir).join(client_path);
+    
+    // Canonicalize to absolute path, resolving all .. and . components
+    // Falls back to joined path if canonicalize fails (e.g., path doesn't exist yet)
+    let absolute = resolved
+        .canonicalize()
+        .unwrap_or(resolved)
         .to_string_lossy()
         .into_owned();
 

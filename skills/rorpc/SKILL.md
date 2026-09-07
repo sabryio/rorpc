@@ -203,6 +203,15 @@ Configure the output path in `Cargo.toml`:
 client_path = "../client/src/rpc/bindings.ts"
 ```
 
+The path can use `..` to navigate outside the Rust workspace for frontends in different directories:
+```toml
+# Frontend next to the workspace root
+client_path = "../../../frontend/src/api/bindings.ts"
+
+# Frontend in a completely different location
+client_path = "../../../../../../other-project/client/rpc.ts"
+```
+
 ```rust
 #[rorpc::contract]
 #[tokio::main]
