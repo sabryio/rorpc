@@ -29,6 +29,7 @@ better-auth = { version = "1.0.0-alpha.2", features = ["axum", "seaorm2"], optio
 
 # Utilities
 chrono = "0.4"
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 async-trait = "0.1.92"
 tokio-stream = "0.1.19"

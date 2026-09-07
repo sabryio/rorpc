@@ -301,6 +301,10 @@ pub fn rust_type_to_zod(ty: &syn::Type, attrs: &ZodAttrs) -> String {
             | "u128" | "usize" => build_integer_schema(attrs),
             "f32" | "f64" => build_float_schema(attrs),
             "bool" => "z.boolean()".to_string(),
+            // uuid::Uuid → z.uuid()
+            "Uuid" => "z.uuid()".to_string(),
+            // chrono::DateTime<Utc> → z.iso.datetime()
+            "DateTime" => "z.iso.datetime({ offset: true })".to_string(),
             // serde_json::Value → z.any()
             "Value" => "z.any()".to_string(),
             // Custom type — reference its schema by name
@@ -513,6 +517,8 @@ fn type_name_to_zod_ref(type_name: &str) -> String {
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
         | "usize" => "z.number().int()".to_string(),
         "f32" | "f64" => "z.number()".to_string(),
+        "Uuid" => "z.uuid()".to_string(),
+        "DateTime" => "z.iso.datetime({ offset: true })".to_string(),
         "serde_json::Value" | "Value" => "z.any()".to_string(),
         _ if type_name.starts_with("Vec<") && type_name.ends_with('>') => {
             let inner = &type_name[4..type_name.len() - 1];
