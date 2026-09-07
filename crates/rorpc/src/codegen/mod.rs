@@ -254,6 +254,78 @@ mod tests {
     }
 
     #[test]
+    fn accepts_multiple_parent_dirs_in_path() {
+        // Test that paths with multiple .. components work (e.g., frontend outside workspace)
+        let builder = ContractBuilder::new(
+            vec![make_handler("test", "GET", "/test")],
+            vec![],
+        );
+        
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("rorpc-test-multiple-parents.ts");
+        
+        // Create a nested directory structure to test ../../.. navigation
+        let nested = temp_dir.join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).ok();
+        
+        // Use relative path with multiple .. to write outside nested dir
+        let relative_from_nested = "../../../rorpc-test-multiple-parents.ts";
+        let full_path = nested.join(relative_from_nested);
+        
+        let result = builder.output(&full_path);
+        
+        // Verify it works (doesn't reject with InvalidInput) - use as_ref to avoid move
+        let is_valid = result.as_ref().map(|_| true).unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
+        assert!(is_valid, "Path with multiple .. should be accepted");
+        
+        // If write succeeded, verify file was created in correct location
+        if result.is_ok() {
+            assert!(test_file.exists(), "File should exist at resolved path");
+            std::fs::remove_file(test_file).ok();
+        }
+        
+        // Cleanup
+        std::fs::remove_dir_all(temp_dir.join("a")).ok();
+    }
+
+    #[test]
+    fn accepts_deep_parent_navigation() {
+        // Test extreme case: ../../../../../../../../ (many levels up)
+        let builder = ContractBuilder::new(
+            vec![make_handler("extreme", "GET", "/extreme")],
+            vec![],
+        );
+        
+        let temp_dir = std::env::temp_dir();
+        let test_output = temp_dir.join("rorpc-deep-navigation-test.ts");
+        
+        // Create very nested structure
+        let deeply_nested = temp_dir
+            .join("level1")
+            .join("level2")
+            .join("level3")
+            .join("level4")
+            .join("level5");
+        std::fs::create_dir_all(&deeply_nested).ok();
+        
+        // Navigate all the way back up
+        let relative = "../../../../../rorpc-deep-navigation-test.ts";
+        let path_from_deep = deeply_nested.join(relative);
+        
+        let result = builder.output(&path_from_deep);
+        
+        // Use as_ref to avoid move
+        let is_valid = result.as_ref().map(|_| true).unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
+        assert!(is_valid, "Deep parent navigation (../../../../..) should be accepted");
+        
+        if result.is_ok() && test_output.exists() {
+            std::fs::remove_file(test_output).ok();
+        }
+        
+        std::fs::remove_dir_all(temp_dir.join("level1")).ok();
+    }
+
+    #[test]
     fn generates_with_no_schemas() {
         let builder = ContractBuilder::new(vec![make_handler("ping", "GET", "/ping")], vec![]);
         let output = builder.generate();
