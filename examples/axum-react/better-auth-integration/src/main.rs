@@ -10,6 +10,15 @@
 //! ```bash
 //! cargo run --features better-auth-integration
 //! ```
+//!
+//! ## Contract Generation
+//! The `#[rorpc::contract]` attribute automatically generates TypeScript bindings
+//! in debug builds. The output path is read from `[package.metadata.rorpc]`
+//! in `Cargo.toml`:
+//! ```toml
+//! [package.metadata.rorpc]
+//! client_path = "../client/src/rpc/bindings.ts"
+//! ```
 
 mod application;
 mod domain;
@@ -29,22 +38,10 @@ use infrastructure::{
 use std::sync::Arc;
 
 #[cfg(feature = "better-auth-integration")]
+#[rorpc::contract]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting Better Auth + orpc integration example...");
-
-    // Generate TypeScript contract before starting the server
-    #[cfg(debug_assertions)]
-    {
-        println!("📝 Generating TypeScript contract...");
-        rorpc::generate_contract()
-            .output(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../client/src/rpc/bindings.ts"
-            ))
-            .expect("contract generation failed");
-        println!("✅ Generated examples/axum-react/client/src/rpc/bindings.ts");
-    }
 
     // 1. Database & auth setup
     let database = infrastructure::db::seaorm::connect("sqlite::memory:").await?;
@@ -77,23 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(feature = "better-auth-integration"))]
+#[rorpc::contract]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting orpc example (without Better Auth integration)...");
     println!("💡 To enable Better Auth, run with: cargo run --features better-auth-integration");
-
-    // Generate TypeScript contract before starting the server
-    #[cfg(debug_assertions)]
-    {
-        println!("📝 Generating TypeScript contract...");
-        rorpc::generate_contract()
-            .output(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../client/src/rpc/bindings.ts"
-            ))
-            .expect("contract generation failed");
-        println!("✅ Generated examples/axum-react/client/src/rpc/bindings.ts");
-    }
 
     // Build shared state — just the repository
     let state = AppState {

@@ -20,7 +20,23 @@ pub async fn list_planets(State(db): State<AppState>) -> Result<Json<Vec<Planet>
 }
 ```
 
-The macro leaves the handler unchanged. At startup, call `generate_contract()` once and the TypeScript side is always in sync:
+The macro leaves the handler unchanged. Configure the output path in `Cargo.toml` and use `#[rorpc::contract]` to automatically generate contracts in debug builds:
+
+```toml
+[package.metadata.rorpc]
+client_path = "../client/src/rpc/bindings.ts"
+```
+
+```rust
+#[rorpc::contract]
+#[tokio::main]
+async fn main() {
+    let app = rorpc::router!(state);
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+Or call `generate_contract()` explicitly:
 
 ```rust
 rorpc::generate_contract()
@@ -104,6 +120,31 @@ rorpc (runtime)
 `rorpc-parse` has no dependency on `rorpc` or `rorpc-macros`. It can be tested independently.
 
 ## Macros
+
+### `#[contract]` — Automatic Contract Generation
+
+Replaces manual `generate_contract()` calls. Only runs in debug builds.
+
+Configure the output path in `Cargo.toml`:
+
+```toml
+[package.metadata.rorpc]
+client_path = "../client/src/rpc/bindings.ts"
+```
+
+```rust
+#[rorpc::contract]
+#[tokio::main]
+async fn main() { /* ... */ }
+```
+
+**Options:**
+- `#[contract]` — reads `[package.metadata.rorpc] client_path` from `Cargo.toml`
+- `#[contract("../client/bindings.ts")]` — string literal
+- `#[contract(CLIENT_PATH)]` — constant
+- `#[contract(concat!(...))]` — expression
+
+See [`docs/metadata-bridge.md`](docs/metadata-bridge.md) for other configuration options.
 
 ### Method-Specific Shorthands (Recommended)
 

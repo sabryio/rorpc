@@ -10,9 +10,37 @@ Procedural macro bridge for [rorpc](https://crates.io/crates/rorpc) — thin wra
 
 This crate contains only proc-macro entry points. All parsing, validation, and code generation logic lives in `rorpc-parse` where it can be tested with normal `#[test]` functions.
 
-The entire implementation is a single `lib.rs` file with four proc macros that delegate to `rorpc-parse`.
+The entire implementation is a single `lib.rs` file with five proc macros that delegate to `rorpc-parse`.
 
 ## Macros
+
+### `#[contract]`
+
+Automatically generate TypeScript contract before `fn main()` runs (debug builds only). Replaces manual `generate_contract()` boilerplate.
+
+Configure the output path in `Cargo.toml`:
+
+```toml
+[package.metadata.rorpc]
+client_path = "../client/src/rpc/bindings.ts"
+```
+
+```rust
+#[rorpc::contract]
+#[tokio::main]
+async fn main() {
+    let app = rorpc::router!(state);
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+**Supported syntaxes:**
+- `#[contract]` — reads `[package.metadata.rorpc] client_path` from `Cargo.toml`
+- `#[contract("../client/bindings.ts")]` — string literal path
+- `#[contract(CLIENT_PATH)]` — constant
+- `#[contract(concat!(...))]` — concat expression
+
+See [docs/metadata-bridge.md](../../docs/metadata-bridge.md) for setup options.
 
 ### Method-Specific Shorthands
 

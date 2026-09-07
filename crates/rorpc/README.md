@@ -47,19 +47,49 @@ async fn find_planet(
     db.find(id).await.map(Json).ok_or(AppError::NotFound)
 }
 
+#[rorpc::contract]
 #[tokio::main]
 async fn main() {
     let app = router!(state);
-
-    rorpc::generate_contract()
-        .output("../client/src/rpc/index.ts")
-        .unwrap();
-
     axum::serve(listener, app).await.unwrap();
 }
 ```
 
+Configure the output path in `Cargo.toml`:
+```toml
+[package.metadata.rorpc]
+client_path = "../client/src/rpc/index.ts"
+```
+
 ## Macros
+
+### `#[contract]` — Automatic Contract Generation (New!)
+
+Replaces manual `generate_contract().output()` boilerplate. Automatically generates TypeScript contracts in debug builds before `main()` runs.
+
+Configure the output path in `Cargo.toml`:
+
+```toml
+[package.metadata.rorpc]
+client_path = "../client/src/rpc/bindings.ts"
+```
+
+```rust
+#[rorpc::contract]
+#[tokio::main]
+async fn main() {
+    let app = router!(state);
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+**Options:**
+- `#[contract]` — reads `[package.metadata.rorpc] client_path` from `Cargo.toml`
+- `#[contract("../client/bindings.ts")]` — string literal
+- `#[contract(CLIENT_PATH)]` — constant
+- `#[contract(concat!(...))]` — expression
+
+See [docs/metadata-bridge.md](../../docs/metadata-bridge.md) for more options.
 
 ### Method-Specific Shorthands (Recommended)
 
@@ -133,12 +163,12 @@ pub struct User {
 }
 ```
 
-### `#[derive(OrpcErrors)]`
+### `#[derive(OrpcError)]`
 
 Generate TypeScript error schemas from Rust error enums.
 
 ```rust
-#[derive(OrpcErrors)]
+#[derive(OrpcError)]
 pub enum AppError {
     NotFound,                    // → NOT_FOUND: {}
     Unauthorized,                // → UNAUTHORIZED: {}

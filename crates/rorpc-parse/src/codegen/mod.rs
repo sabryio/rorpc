@@ -5,12 +5,14 @@
 //! that lives there is the thin `proc_macro::TokenStream` ↔ `proc_macro2::TokenStream`
 //! conversion.
 
+pub mod contract_attr;
 pub mod error_derive;
 pub mod orpc;
 pub mod router;
 pub mod zod_ts;
 
 // Re-export the types that orpc-macros needs at the call site
+pub use contract_attr::{ContractArgs, expand_contract};
 pub use error_derive::expand_orpc_errors;
 pub use orpc::{MethodShorthandArgs, OrpcArgs, expand_orpc};
 pub use router::{RouterArgs, expand_router};

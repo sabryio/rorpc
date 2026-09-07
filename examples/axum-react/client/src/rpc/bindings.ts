@@ -6,12 +6,25 @@ import { oc } from "@orpc/contract";
 import { openapi } from "@orpc/openapi";
 import { asyncIteratorObject } from "@orpc/contract";
 
-export const CreatePlanetInputSchema = z.object({
-  name: z.string(),
-  description: z.string().optional()
+export const EventDataSchema = z.object({
+  message: z.string(),
+  count: z.number().int()
 });
 
-export type CreatePlanetInput = z.infer<typeof CreatePlanetInputSchema>;
+export type EventData = z.infer<typeof EventDataSchema>;
+
+export const DeletePlanetInputSchema = z.object({
+  id: z.number().int()
+});
+
+export type DeletePlanetInput = z.infer<typeof DeletePlanetInputSchema>;
+
+export const ListPlanetsPaginatedInputSchema = z.object({
+  limit: z.number().int(),
+  offset: z.number().int().optional()
+});
+
+export type ListPlanetsPaginatedInput = z.infer<typeof ListPlanetsPaginatedInputSchema>;
 
 export const PlanetSchema = z.object({
   id: z.number().int(),
@@ -28,25 +41,12 @@ export const ListPlanetsPaginatedOutputSchema = z.object({
 
 export type ListPlanetsPaginatedOutput = z.infer<typeof ListPlanetsPaginatedOutputSchema>;
 
-export const DeletePlanetInputSchema = z.object({
-  id: z.number().int()
+export const CreatePlanetInputSchema = z.object({
+  name: z.string(),
+  description: z.string().optional()
 });
 
-export type DeletePlanetInput = z.infer<typeof DeletePlanetInputSchema>;
-
-export const ListPlanetsPaginatedInputSchema = z.object({
-  limit: z.number().int(),
-  offset: z.number().int().optional()
-});
-
-export type ListPlanetsPaginatedInput = z.infer<typeof ListPlanetsPaginatedInputSchema>;
-
-export const EventDataSchema = z.object({
-  message: z.string(),
-  count: z.number().int()
-});
-
-export type EventData = z.infer<typeof EventDataSchema>;
+export type CreatePlanetInput = z.infer<typeof CreatePlanetInputSchema>;
 
 export const FindPlanetQuerySchema = z.object({
   q: z.string().optional()
@@ -55,6 +55,9 @@ export const FindPlanetQuerySchema = z.object({
 export type FindPlanetQuery = z.infer<typeof FindPlanetQuerySchema>;
 
 export const contract = {
+  ping: oc
+      .meta(openapi({ method: "GET", path: "/ping" }))
+      .output(z.string()),
   createPlanet: oc
       .meta(openapi({ method: "POST", path: "/planet" }))
       .input(CreatePlanetInputSchema)
@@ -71,12 +74,6 @@ export const contract = {
   streamEvents: oc
       .meta(openapi({ method: "GET", path: "/stream" }))
       .output(asyncIteratorObject(EventDataSchema)),
-  ping: oc
-      .meta(openapi({ method: "GET", path: "/ping" }))
-      .output(z.string()),
-  getProfile: oc
-      .meta(openapi({ method: "GET", path: "/profile" }))
-      .output(z.any()),
   planet: {
     deletePlanet: oc
       .meta(openapi({ method: "DELETE", path: "/planet/{id}" }))

@@ -47,6 +47,7 @@ pub use inventory;
 pub use rorpc_macros::{OrpcError, ZodTs};
 
 // Re-export the attribute macros and router! proc macro
+pub use rorpc_macros::contract;
 pub use rorpc_macros::delete;
 pub use rorpc_macros::get;
 pub use rorpc_macros::patch;

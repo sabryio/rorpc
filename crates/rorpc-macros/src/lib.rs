@@ -252,3 +252,143 @@ pub fn derive_orpc_errors(input: TokenStream) -> TokenStream {
         Err(err) => err.to_compile_error().into(),
     }
 }
+
+/// Automatically generate TypeScript contract before `fn main()` runs (debug builds only).
+///
+/// This attribute wraps the main function to call `rorpc::generate_contract().output(path)`
+/// before executing the original body. Only active in debug builds (`#[cfg(debug_assertions)]`).
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// // Default: env!("RORPC_CLIENT_PATH")
+/// #[rorpc::contract]
+/// fn main() {
+///     // Your main logic
+/// }
+///
+/// // String literal
+/// #[rorpc::contract("../client/src/rpc/bindings.ts")]
+/// fn main() { }
+///
+/// // Environment variable
+/// #[rorpc::contract(env!("RORPC_CLIENT_PATH"))]
+/// fn main() { }
+///
+/// // concat! expression
+/// #[rorpc::contract(concat!(env!("CARGO_MANIFEST_DIR"), "/../client/bindings.ts"))]
+/// fn main() { }
+///
+/// // Constant
+/// const CLIENT_PATH: &str = "../client/bindings.ts";
+/// #[rorpc::contract(CLIENT_PATH)]
+/// fn main() { }
+/// ```
+///
+/// # Setting the output path
+///
+/// ## Recommended: `[package.metadata.rorpc]` in `Cargo.toml`
+///
+/// ```toml
+/// [package.metadata.rorpc]
+/// client_path = "../client/src/rpc/bindings.ts"
+/// ```
+///
+/// Then just use `#[rorpc::contract]` with no arguments. The macro reads
+/// `Cargo.toml` at compile time and bakes in the resolved absolute path.
+///
+/// ## Alternative: explicit argument
+///
+/// String literal:
+/// ```rust,ignore
+/// #[rorpc::contract("../client/src/rpc/bindings.ts")]
+/// fn main() { }
+/// ```
+///
+/// `concat!` expression (absolute path):
+/// ```rust,ignore
+/// #[rorpc::contract(concat!(env!("CARGO_MANIFEST_DIR"), "/../client/bindings.ts"))]
+/// fn main() { }
+/// ```
+///
+/// Constant:
+/// ```rust,ignore
+/// const CLIENT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../client/bindings.ts");
+///
+/// #[rorpc::contract(CLIENT_PATH)]
+/// fn main() { }
+/// ```
+///
+/// ## Fallback: `env!("RORPC_CLIENT_PATH")`
+///
+/// If no argument is given and `[package.metadata.rorpc] client_path` is absent,
+/// the macro falls back to `env!("RORPC_CLIENT_PATH")`. Set it via `build.rs`:
+/// ```rust,ignore
+/// fn main() {
+///     println!("cargo:rustc-env=RORPC_CLIENT_PATH=../client/src/rpc/bindings.ts");
+/// }
+/// ```
+///
+/// In `Cargo.toml`:
+/// ```toml
+/// [package.metadata.rorpc]
+/// client_path = "../client/src/rpc/bindings.ts"
+/// ```
+///
+/// In `build.rs`:
+/// ```rust,ignore
+/// fn main() {
+///     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+///     let manifest_path = std::path::Path::new(&manifest_dir).join("Cargo.toml");
+///     let manifest = std::fs::read_to_string(manifest_path).unwrap();
+///     
+///     let toml: toml::Value = toml::from_str(&manifest).unwrap();
+///     if let Some(client_path) = toml.get("package")
+///         .and_then(|p| p.get("metadata"))
+///         .and_then(|m| m.get("rorpc"))
+///         .and_then(|r| r.get("client_path"))
+///         .and_then(|c| c.as_str())
+///     {
+///         println!("cargo:rustc-env=RORPC_CLIENT_PATH={}", client_path);
+///     }
+/// }
+/// ```
+///
+/// Add to `Cargo.toml` dependencies:
+/// ```toml
+/// [build-dependencies]
+/// toml = "0.8"
+/// ```
+///
+/// ## Other options
+///
+/// ```toml
+/// [env]
+/// RORPC_CLIENT_PATH = "../client/src/rpc/bindings.ts"
+/// ```
+///
+/// Shell environment variable:
+/// ```bash
+/// export RORPC_CLIENT_PATH="../client/src/rpc/bindings.ts"
+/// cargo run
+/// ```
+///
+///
+/// # Compatibility
+///
+/// This attribute preserves the function signature and can be combined with other
+/// attributes like `#[tokio::main]`, `#[actix_web::main]`, etc.:
+///
+/// ```rust,ignore
+/// #[rorpc::contract]
+/// #[tokio::main]
+/// async fn main() {
+///     // Contract generated before async runtime starts
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn contract(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as rorpc_parse::codegen::ContractArgs);
+    let func = parse_macro_input!(item as syn::ItemFn);
+    rorpc_parse::codegen::expand_contract(args, func).into()
+}
