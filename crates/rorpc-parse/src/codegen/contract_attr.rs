@@ -175,7 +175,8 @@ mod tests {
 
         assert!(s.contains("\"../client/bindings.ts\""));
         assert!(s.contains("rorpc :: generate_contract"));
-        assert!(s.contains("#[cfg(debug_assertions)]"));
+        // quote! adds spaces between tokens, so check for "# [cfg"
+        assert!(s.contains("# [cfg (debug_assertions)]") || s.contains("#[cfg(debug_assertions)]"));
     }
 
     #[test]
@@ -191,7 +192,8 @@ mod tests {
         let expanded = expand_contract(args, func);
         let s = expanded.to_string();
 
-        assert!(s.contains("#[tokio :: main]"));
+        // quote! adds spaces, so check for "# [tokio"
+        assert!(s.contains("# [tokio :: main]") || s.contains("#[tokio::main]"));
         assert!(s.contains("async fn main"));
     }
 }

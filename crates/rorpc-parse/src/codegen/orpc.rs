@@ -340,6 +340,7 @@ fn try_expand_orpc(args: OrpcArgs, func: ItemFn) -> Result<TokenStream> {
                 query_type_name: #query_type_token,
                 output_type_name: #output_type_str,
                 module_path: ::std::module_path!(),
+                namespace: None,
                 error_type_name: #error_type_token,
                 stream_event_type_name: #stream_event_token,
                 path_param_types: #path_param_types_str,
@@ -367,7 +368,7 @@ fn emit_handler_registration(
                 ::rorpc::HandlerRegistration {
                     path: #path,
                     method: #method,
-                    factory: |state: ::std::sync::Arc<dyn ::std::any::Any + Send + Sync>| {
+                    factory: |state: ::std::sync::Arc<dyn ::std::any::Any + Send + Sync>, final_path: &str| {
                         use ::axum::routing::{delete, get, patch, post, put};
                         let method_router = match #method {
                             "GET"    => get(#fn_name),
@@ -379,7 +380,7 @@ fn emit_handler_registration(
                         };
                         if let Some(typed_state) = state.downcast_ref::<#state_ty>() {
                             ::axum::Router::new()
-                                .route(#path, method_router)
+                                .route(final_path, method_router)
                                 .with_state(typed_state.clone())
                         } else {
                             ::axum::Router::new()
@@ -394,7 +395,7 @@ fn emit_handler_registration(
                 ::rorpc::HandlerRegistration {
                     path: #path,
                     method: #method,
-                    factory: |_state: ::std::sync::Arc<dyn ::std::any::Any + Send + Sync>| {
+                    factory: |_state: ::std::sync::Arc<dyn ::std::any::Any + Send + Sync>, final_path: &str| {
                         use ::axum::routing::{delete, get, patch, post, put};
                         let method_router = match #method {
                             "GET"    => get(#fn_name),
@@ -404,7 +405,7 @@ fn emit_handler_registration(
                             "DELETE" => delete(#fn_name),
                             _        => post(#fn_name),
                         };
-                        ::axum::Router::new().route(#path, method_router)
+                        ::axum::Router::new().route(final_path, method_router)
                     },
                 }
             }

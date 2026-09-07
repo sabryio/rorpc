@@ -23,6 +23,8 @@ pub struct HandlerMetadata {
     pub output_type_name: &'static str,
     /// Rust module path of the handler (e.g. `"axum_native::handlers::planet"`)
     pub module_path: &'static str,
+    /// Namespace prefix applied to this handler (if any, e.g. `"/planet"`)
+    pub namespace: Option<&'static str>,
     /// Error type name extracted from `Result<T, E>` return type (if present)
     pub error_type_name: Option<&'static str>,
     /// Stream event type name for SSE endpoints (if specified with `data` attribute)
@@ -36,3 +38,16 @@ pub struct HandlerMetadata {
 }
 
 inventory::collect!(HandlerMetadata);
+
+/// Namespace metadata registered by the `#[rorpc::namespace("/prefix")]` attribute macro.
+///
+/// Applied to modules to automatically prefix all handler routes within that module.
+/// One instance is created per annotated module and registered globally at link time.
+pub struct NamespaceMetadata {
+    /// Rust module path where the namespace was declared (e.g. `"crate::handlers::planet"`)
+    pub module_path: &'static str,
+    /// HTTP path prefix to prepend to all handlers in this module (e.g. `"/planet"`)
+    pub prefix: &'static str,
+}
+
+inventory::collect!(NamespaceMetadata);

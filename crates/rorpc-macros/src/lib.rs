@@ -392,3 +392,64 @@ pub fn contract(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as syn::ItemFn);
     rorpc_parse::codegen::expand_contract(args, func).into()
 }
+
+/// Apply a namespace prefix to all handlers within a module.
+///
+/// This attribute registers a namespace that will be prepended to all handler
+/// routes within the annotated module at runtime (during router construction
+/// and contract generation).
+///
+/// # Syntax
+///
+/// ```rust,ignore
+/// #[rorpc::namespace("/planet")]
+/// mod planet_handlers {
+///     #[rorpc::get("/list")]           // Becomes /planet/list
+///     async fn list() { ... }
+///
+///     #[rorpc::get("/{id}")]           // Becomes /planet/{id}
+///     async fn find() { ... }
+///
+///     #[rorpc::post("/create")]        // Becomes /planet/create
+///     async fn create() { ... }
+/// }
+/// ```
+///
+/// # Rules
+///
+/// - Prefix must start with `/`
+/// - Prefix cannot contain `..` path traversal
+/// - Prefix should not end with `/` (except for root `/`)
+/// - Namespace always concatenates with handler path (e.g., `/api` + `/planet/list` = `/api/planet/list`)
+///
+/// # Nested Namespaces
+///
+/// You can nest namespaced modules for deeper path structures:
+///
+/// ```rust,ignore
+/// #[rorpc::namespace("/api")]
+/// mod api {
+///     #[rorpc::namespace("/v1")]
+///     mod v1 {
+///         #[rorpc::get("/status")]  // Becomes /api/v1/status
+///         async fn status() { ... }
+///     }
+/// }
+/// ```
+///
+/// # Composition
+///
+/// The namespace prefix is applied to the handler's path at runtime when:
+/// - Building the router with `router!()`
+/// - Generating the TypeScript contract with `generate_contract()`
+///
+/// Handlers without a namespace behave exactly as before (no prefix applied).
+#[proc_macro_attribute]
+pub fn namespace(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as rorpc_parse::codegen::NamespaceArgs);
+    let module_item = parse_macro_input!(item as syn::Item);
+    match rorpc_parse::codegen::expand_namespace(args, module_item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}

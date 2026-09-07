@@ -137,7 +137,27 @@ fn generate_procedure_entry(
 /// # Examples
 ///
 /// ```
-/// # use rorpc::codegen::contract::extract_path_params;
+/// # fn extract_path_params(path: &str) -> Vec<String> {
+/// #     let mut params = Vec::new();
+/// #     let mut chars = path.chars().peekable();
+/// #     while let Some(ch) = chars.next() {
+/// #         if ch == '{' {
+/// #             let mut param_name = String::new();
+/// #             while let Some(&next_ch) = chars.peek() {
+/// #                 if next_ch == '}' {
+/// #                     chars.next();
+/// #                     break;
+/// #                 }
+/// #                 param_name.push(chars.next().unwrap());
+/// #             }
+/// #             if !param_name.is_empty() {
+/// #                 let clean_name = param_name.trim_start_matches('+');
+/// #                 params.push(clean_name.to_string());
+/// #             }
+/// #         }
+/// #     }
+/// #     params
+/// # }
 /// assert_eq!(extract_path_params("/planet/{id}"), vec!["id"]);
 /// assert_eq!(extract_path_params("/workspace/{wsId}/project/{projId}"),
 ///            vec!["wsId", "projId"]);

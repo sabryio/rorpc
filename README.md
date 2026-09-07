@@ -186,6 +186,75 @@ pub async fn stream_events() -> Sse<impl Stream<Item = Event>>
 
 **Available methods:** `get`, `post`, `put`, `patch`, `delete`
 
+### `#[rorpc::namespace]` — Path Grouping
+
+Group related handlers under a common path prefix using an inline module:
+
+```rust
+// planet.rs
+use axum::{extract::State, Json};
+
+#[rorpc::namespace("/planet")]
+pub mod routes {
+    use super::*;
+
+    #[rorpc::get("/list")]           // Becomes /planet/list
+    pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<Planet>>, AppError> {
+        // ...
+    }
+
+    #[rorpc::get("/{id}")]           // Becomes /planet/{id}
+    pub async fn find(
+        State(s): State<AppState>,
+        Path(id): Path<i32>,
+    ) -> Result<Json<Planet>, AppError> {
+        // ...
+    }
+
+    #[rorpc::post("/")]              // Becomes /planet
+    pub async fn create(
+        State(s): State<AppState>,
+        Json(input): Json<CreatePlanetInput>,
+    ) -> Result<Json<Planet>, AppError> {
+        // ...
+    }
+}
+```
+
+**Rules:**
+- Prefix must start with `/`
+- Prefix cannot contain `..` path traversal
+- Prefix should not end with `/` (except for root `/`)
+- Namespace always concatenates with handler path: `/api` + `/planet/list` = `/api/planet/list`
+
+**Why inline modules?**
+
+Due to Rust's proc macro stability limitations, `#[namespace]` requires an inline module (`pub mod routes { ... }`). Neither file modules (`#[namespace] mod planet;`) nor inner attributes (`#![namespace("/planet")]`) work on stable Rust.
+
+**Nested Namespaces:**
+
+```rust
+#[rorpc::namespace("/api")]
+pub mod api {
+    #[rorpc::namespace("/v1")]
+    pub mod v1 {
+        use super::*;
+        
+        #[rorpc::get("/status")]  // Becomes /api/v1/status
+        pub async fn status() -> Json<&'static str> {
+            Json("ok")
+        }
+    }
+}
+```
+
+**Without namespace** (handlers still work as before):
+
+```rust
+#[rorpc::get("/planet/list")]
+pub async fn list_planets(State(s): State<AppState>) -> Result<Json<Vec<Planet>>, AppError>
+```
+
 ### `#[rorpc::route]` — Explicit Method + Path
 
 For when you need the explicit form or non-standard methods:

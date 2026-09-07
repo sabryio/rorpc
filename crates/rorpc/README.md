@@ -121,6 +121,63 @@ async fn stream() -> Sse<impl Stream<Item = Event>>
 
 **Available methods:** `get`, `post`, `put`, `patch`, `delete`
 
+### `#[rorpc::namespace]` — Path Grouping
+
+Group related handlers under a common path prefix using an inline module:
+
+```rust
+// planet.rs
+use axum::{extract::State, Json};
+
+#[rorpc::namespace("/planet")]
+pub mod routes {
+    use super::*;
+
+    #[rorpc::get("/list")]           // Becomes /planet/list
+    pub async fn list(State(db): State<Db>) -> Json<Vec<Planet>> {
+        Json(db.list().await)
+    }
+
+    #[rorpc::post("/")]              // Becomes /planet
+    pub async fn create(
+        State(db): State<Db>,
+        Json(input): Json<CreateInput>,
+    ) -> Result<Json<Planet>, AppError> {
+        db.create(input).await.map(Json)
+    }
+
+    #[rorpc::get("/{id}")]           // Becomes /planet/{id}
+    pub async fn find(State(db): State<Db>, Path(id): Path<i32>) -> Result<Json<Planet>, AppError> {
+        db.find(id).await.map(Json).ok_or(AppError::NotFound)
+    }
+}
+```
+
+**Benefits:**
+- DRY: No repeated `/planet/` prefix in every handler
+- Easier refactoring: Change prefix in one place
+- Clear module organization: Group by domain/resource
+
+**Why inline modules?**
+
+Due to Rust's proc macro stability limitations, `#[namespace]` requires an inline module (`pub mod routes { ... }`). Neither file modules (`#[namespace] mod planet;`) nor inner attributes (`#![namespace("/planet")]`) work on stable Rust.
+
+**Nested namespaces** for versioning:
+```rust
+#[rorpc::namespace("/api")]
+pub mod api {
+    #[rorpc::namespace("/v1")]
+    pub mod v1 {
+        use super::*;
+        
+        #[rorpc::get("/status")]  // Becomes /api/v1/status
+        pub async fn status() -> Json<&'static str> {
+            Json("ok")
+        }
+    }
+}
+```
+
 ### `#[rorpc::route]` — Explicit Method + Path
 
 For non-standard methods or when you prefer explicit syntax:

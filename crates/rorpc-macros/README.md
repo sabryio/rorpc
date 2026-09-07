@@ -70,6 +70,51 @@ async fn find_planet(
 
 - `data` — SSE data payload type for streaming handlers (e.g. `data = "StreamEvent"`)
 
+### `#[rorpc::namespace]`
+
+Group related handlers under a common path prefix using an inline module:
+
+```rust
+// planet.rs
+
+#[rorpc::namespace("/planet")]
+pub mod routes {
+    use super::*;
+
+    #[rorpc::get("/list")]     // Becomes /planet/list
+    pub async fn list(State(db): State<Db>) -> Json<Vec<Planet>> {
+        Json(db.list().await)
+    }
+
+    #[rorpc::get("/{id}")]     // Becomes /planet/{id}
+    pub async fn find(State(db): State<Db>, Path(id): Path<i32>) -> Result<Json<Planet>, AppError> {
+        db.find(id).await.map(Json).ok_or(AppError::NotFound)
+    }
+}
+```
+
+**Rules:**
+- Prefix must start with `/`
+- Prefix cannot contain `..` path traversal
+- Namespace concatenates with handler path: `/api` + `/status` = `/api/status`
+- **Requires inline module** — file modules and inner attributes don't work on stable Rust
+
+**Supports nested namespaces:**
+```rust
+#[rorpc::namespace("/api")]
+pub mod api {
+    #[rorpc::namespace("/v1")]
+    pub mod v1 {
+        use super::*;
+        
+        #[rorpc::get("/status")]  // Becomes /api/v1/status
+        pub async fn status() -> Json<&'static str> {
+            Json("ok")
+        }
+    }
+}
+```
+
 ### `#[rorpc::route]`
 
 Explicit method + path syntax:

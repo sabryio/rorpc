@@ -135,10 +135,37 @@ pub fn expand_router(args: RouterArgs) -> TokenStream {
         {
             let state: ::std::sync::Arc<dyn ::std::any::Any + Send + Sync> = #state_expr;
             let mut app: ::axum::Router = ::axum::Router::new();
+            
+            // Build namespace lookup map: module_path -> prefix
+            let mut namespace_map: ::std::collections::HashMap<&'static str, &'static str> = 
+                ::std::collections::HashMap::new();
+            for ns in ::rorpc::inventory::iter::<::rorpc::NamespaceMetadata> {
+                namespace_map.insert(ns.module_path, ns.prefix);
+            }
+            
             for reg in ::rorpc::inventory::iter::<::rorpc::HandlerRegistration> {
                 let matches = #filter;
                 if matches {
-                    let route = (reg.factory)(::std::sync::Arc::clone(&state));
+                    // Look up namespace for this handler and compose final path
+                    let mut final_path: String = reg.path.to_string();
+                    for metadata in ::rorpc::inventory::iter::<::rorpc::HandlerMetadata> {
+                        if metadata.path == reg.path && metadata.method == reg.method {
+                            // Check if handler's module or any parent has a namespace
+                            let module_parts: Vec<&str> = metadata.module_path.split("::").collect();
+                            for i in (0..=module_parts.len()).rev() {
+                                let parent_path = module_parts[..i].join("::");
+                                if let Some(prefix) = namespace_map.get(parent_path.as_str()) {
+                                    // Compose namespace + handler path
+                                    final_path = format!("{}{}", prefix, reg.path);
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    
+                    // Call factory with composed path
+                    let route = (reg.factory)(::std::sync::Arc::clone(&state), &final_path);
                     app = app.merge(route);
                 }
             }

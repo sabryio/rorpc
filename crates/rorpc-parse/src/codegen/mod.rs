@@ -7,6 +7,7 @@
 
 pub mod contract_attr;
 pub mod error_derive;
+pub mod namespace;
 pub mod orpc;
 pub mod router;
 pub mod zod_ts;
@@ -14,6 +15,7 @@ pub mod zod_ts;
 // Re-export the types that orpc-macros needs at the call site
 pub use contract_attr::{ContractArgs, expand_contract};
 pub use error_derive::expand_orpc_errors;
+pub use namespace::{NamespaceArgs, expand_namespace};
 pub use orpc::{MethodShorthandArgs, OrpcArgs, expand_orpc};
 pub use router::{RouterArgs, expand_router};
 pub use zod_ts::derive_zod_ts;

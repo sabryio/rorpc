@@ -37,7 +37,7 @@ pub mod schema_registry;
 
 pub use codegen::ContractBuilder;
 pub use error_registry::{ErrorRegistration, ErrorVariant};
-pub use metadata::HandlerMetadata;
+pub use metadata::{HandlerMetadata, NamespaceMetadata};
 pub use registration::HandlerRegistration;
 pub use schema_registry::SchemaRegistration;
 
@@ -50,6 +50,7 @@ pub use rorpc_macros::{OrpcError, ZodTs};
 pub use rorpc_macros::contract;
 pub use rorpc_macros::delete;
 pub use rorpc_macros::get;
+pub use rorpc_macros::namespace;
 pub use rorpc_macros::patch;
 pub use rorpc_macros::post;
 pub use rorpc_macros::put;
@@ -66,19 +67,40 @@ pub use rorpc_macros::router;
 ///     .unwrap();
 /// ```
 pub fn generate_contract() -> ContractBuilder {
+    // Build namespace lookup map: module_path -> prefix
+    let mut namespace_map: std::collections::HashMap<&'static str, &'static str> =
+        std::collections::HashMap::new();
+    for ns in inventory::iter::<NamespaceMetadata> {
+        namespace_map.insert(ns.module_path, ns.prefix);
+    }
+
     let handlers: Vec<codegen::HandlerInfo> = inventory::iter::<HandlerMetadata>
         .into_iter()
-        .map(|m| codegen::HandlerInfo {
-            name: m.name,
-            method: m.method,
-            path: m.path,
-            input_type_name: m.input_type_name,
-            query_type_name: m.query_type_name,
-            output_type_name: m.output_type_name,
-            module_path: m.module_path,
-            error_type_name: m.error_type_name,
-            stream_event_type_name: m.stream_event_type_name,
-            path_param_types: m.path_param_types,
+        .map(|m| {
+            // Look up namespace for this handler's module or any parent module
+            let mut final_path = m.path.to_string();
+            let module_parts: Vec<&str> = m.module_path.split("::").collect();
+            for i in (0..=module_parts.len()).rev() {
+                let parent_path = module_parts[..i].join("::");
+                if let Some(prefix) = namespace_map.get(parent_path.as_str()) {
+                    // Compose namespace + handler path
+                    final_path = format!("{}{}", prefix, m.path);
+                    break;
+                }
+            }
+
+            codegen::HandlerInfo {
+                name: m.name,
+                method: m.method,
+                path: Box::leak(final_path.into_boxed_str()),
+                input_type_name: m.input_type_name,
+                query_type_name: m.query_type_name,
+                output_type_name: m.output_type_name,
+                module_path: m.module_path,
+                error_type_name: m.error_type_name,
+                stream_event_type_name: m.stream_event_type_name,
+                path_param_types: m.path_param_types,
+            }
         })
         .collect();
 

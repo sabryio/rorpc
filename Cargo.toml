@@ -20,9 +20,9 @@ homepage = "https://github.com/sabryio/rorpc"
 
 [workspace.dependencies]
 # Internal crates
-rorpc = { path = "crates/rorpc", version = "0.1.3" }
-rorpc-macros = { path = "crates/rorpc-macros", version = "0.1.3" }
-rorpc-parse = { path = "crates/rorpc-parse", version = "0.1.3" }
+rorpc = { path = "crates/rorpc", version = "0.1.4" }
+rorpc-macros = { path = "crates/rorpc-macros", version = "0.1.4" }
+rorpc-parse = { path = "crates/rorpc-parse", version = "0.1.4" }
 
 # Proc-macro toolchain
 syn = { version = "3.0", features = ["full"] }
