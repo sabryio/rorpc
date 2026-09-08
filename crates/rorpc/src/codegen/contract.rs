@@ -172,7 +172,9 @@ fn generate_procedure_entry(
     let output_schema = {
         let schema = if let Some(event_type) = handler.stream_event_type_name {
             // SSE streaming handler — output is an async iterator of the event type
-            format!("asyncIteratorObject({}Schema)", event_type)
+            // Use resolve_schema to handle path normalization and schema name mapping
+            let resolved = resolve_schema(event_type, schema_name_map);
+            format!("asyncIteratorObject({})", resolved)
         } else {
             resolve_schema(handler.output_type_name, schema_name_map)
         };

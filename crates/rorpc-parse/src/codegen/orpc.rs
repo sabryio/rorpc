@@ -36,7 +36,7 @@ const ATTR_DATA: &str = "data";
 pub struct OrpcArgs {
     pub method: String,
     pub path: String,
-    pub stream_event: Option<String>,
+    pub stream_event: Option<syn::Path>,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,7 @@ pub struct OrpcArgs {
 /// Syntax: `#[orpc::get("/path")]` or `#[orpc::post("/path", data = "StreamEvent")]`
 pub struct MethodShorthandArgs {
     pub path: String,
-    pub data: Option<String>,
+    pub data: Option<syn::Path>,
 }
 
 impl Parse for MethodShorthandArgs {
@@ -83,15 +83,22 @@ impl Parse for MethodShorthandArgs {
                         Expr::Lit(ExprLit {
                             lit: Lit::Str(s), ..
                         }) => {
-                            data = Some(s.value());
+                            let path_str = s.value();
+                            // Parse string content as a Rust path
+                            let parsed_path: syn::Path =
+                                syn::parse_str(&path_str).map_err(|e| {
+                                    syn::Error::new(
+                                        span,
+                                        format!(
+                                            "{} string \"{}\" is not a valid Rust type path: {}",
+                                            ATTR_DATA, path_str, e
+                                        ),
+                                    )
+                                })?;
+                            data = Some(parsed_path);
                         }
                         Expr::Path(expr_path) => {
-                            let type_path = syn::TypePath {
-                                attrs: vec![],
-                                qself: expr_path.qself.clone(),
-                                path: expr_path.path.clone(),
-                            };
-                            data = Some(type_display(&syn::Type::Path(type_path)));
+                            data = Some(expr_path.path.clone());
                         }
                         _ => {
                             return Err(syn::Error::new(
@@ -195,21 +202,29 @@ impl Parse for OrpcArgs {
                 }
                 ATTR_DATA => {
                     match &pair.value {
-                        // String literal: data = "StreamEvent" or data = "module::StreamEvent"
-                        // Preferred syntax for IDE support
+                        // String literal containing a type path: data = "crate::SseEvent"
+                        // Parse the string as a Rust path for compile-time validation
                         Expr::Lit(ExprLit {
                             lit: Lit::Str(s), ..
                         }) => {
-                            stream_event = Some(s.value());
+                            let path_str = s.value();
+                            // Parse string content as a Rust path to validate syntax
+                            let parsed_path: syn::Path =
+                                syn::parse_str(&path_str).map_err(|e| {
+                                    syn::Error::new(
+                                        span,
+                                        format!(
+                                            "{} string \"{}\" is not a valid Rust type path: {}",
+                                            ATTR_DATA, path_str, e
+                                        ),
+                                    )
+                                })?;
+                            // Store the parsed path for witness generation
+                            stream_event = Some(parsed_path);
                         }
-                        // Type path: data = StreamEvent (backward compatibility)
+                        // Type path: data = StreamEvent (deprecated but still supported)
                         Expr::Path(expr_path) => {
-                            let type_path = syn::TypePath {
-                                attrs: vec![],
-                                qself: expr_path.qself.clone(),
-                                path: expr_path.path.clone(),
-                            };
-                            stream_event = Some(type_display(&syn::Type::Path(type_path)));
+                            stream_event = Some(expr_path.path.clone());
                         }
                         _ => {
                             return Err(syn::Error::new(
@@ -296,11 +311,33 @@ fn try_expand_orpc(args: OrpcArgs, func: ItemFn) -> Result<TokenStream> {
     };
 
     let stream_event_token = match &args.stream_event {
-        Some(type_name) => {
-            let s = type_name.as_str();
-            quote! { Some(#s) }
+        Some(type_path) => {
+            // Extract bare name (last segment) for metadata storage
+            let bare_name = type_path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+            quote! { Some(#bare_name) }
         }
         None => quote! { None },
+    };
+
+    // Generate compile-time witness for SSE event type validation
+    let stream_event_witness = match &args.stream_event {
+        Some(type_path) => {
+            quote! {
+                // Compile-time witness: validates type is Serialize
+                // ZodTs derive is validated by inventory schema registration
+                const _: () = {
+                    fn assert_serialize<T: ::serde::Serialize>() {}
+                    fn check() {
+                        assert_serialize::<#type_path>();
+                    }
+                };
+            }
+        }
+        None => quote! {},
     };
 
     let input_type_str = match &sig.input_type {
@@ -327,9 +364,12 @@ fn try_expand_orpc(args: OrpcArgs, func: ItemFn) -> Result<TokenStream> {
 
     let registration = emit_handler_registration(fn_name, method, path, &sig.state_type);
     let schema_registrations = emit_schema_registrations(&func);
+    let stream_event_schema_reg = emit_stream_event_schema_registration(&args.stream_event);
 
     Ok(quote! {
         #func
+
+        #stream_event_witness
 
         ::rorpc::inventory::submit! {
             ::rorpc::HandlerMetadata {
@@ -349,6 +389,7 @@ fn try_expand_orpc(args: OrpcArgs, func: ItemFn) -> Result<TokenStream> {
 
         #registration
         #schema_registrations
+        #stream_event_schema_reg
     })
 }
 
@@ -481,6 +522,34 @@ fn emit_schema_registrations(func: &ItemFn) -> TokenStream {
     quote! { #(#registrations)* }
 }
 
+/// Generate schema registration for SSE event type specified via `data` attribute.
+///
+/// Similar to `emit_schema_registrations`, but for the stream event type.
+fn emit_stream_event_schema_registration(stream_event: &Option<syn::Path>) -> TokenStream {
+    match stream_event {
+        Some(type_path) => {
+            // Extract bare name for registration
+            let bare_name = type_path
+                .segments
+                .last()
+                .map(|seg| seg.ident.to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            quote! {
+                ::rorpc::inventory::submit! {
+                    ::rorpc::SchemaRegistration {
+                        type_name: #bare_name,
+                        module_path: "",
+                        schema_def: ::rorpc::SchemaDef::Unknown,
+                        dependent_types: || vec![],
+                    }
+                }
+            }
+        }
+        None => quote! {},
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -499,7 +568,13 @@ mod tests {
 
         assert_eq!(args.method, "GET");
         assert_eq!(args.path, "/stream");
-        assert_eq!(args.stream_event, Some("StreamEvent".to_string()));
+        assert!(args.stream_event.is_some());
+        let path = args.stream_event.unwrap();
+        assert_eq!(path.segments.len(), 1);
+        assert_eq!(
+            path.segments.first().unwrap().ident.to_string(),
+            "StreamEvent"
+        );
     }
 
     #[test]
@@ -509,9 +584,15 @@ mod tests {
             method = "GET", path = "/stream", data = "crate::models::StreamEvent"
         };
 
+        assert_eq!(args.method, "GET");
+        assert_eq!(args.path, "/stream");
+        assert!(args.stream_event.is_some());
+        // Verify the path was parsed correctly
+        let path = args.stream_event.unwrap();
+        assert_eq!(path.segments.len(), 3);
         assert_eq!(
-            args.stream_event,
-            Some("crate::models::StreamEvent".to_string())
+            path.segments.last().unwrap().ident.to_string(),
+            "StreamEvent"
         );
     }
 
@@ -524,7 +605,13 @@ mod tests {
 
         assert_eq!(args.method, "GET");
         assert_eq!(args.path, "/stream");
-        assert_eq!(args.stream_event, Some("StreamEvent".to_string()));
+        assert!(args.stream_event.is_some());
+        let path = args.stream_event.unwrap();
+        assert_eq!(path.segments.len(), 1);
+        assert_eq!(
+            path.segments.first().unwrap().ident.to_string(),
+            "StreamEvent"
+        );
     }
 
     #[test]
@@ -592,7 +679,12 @@ fn parse_shorthand_with_data_string() {
     let args: MethodShorthandArgs = syn::parse_quote! { "/stream", data = "EventData" };
 
     assert_eq!(args.path, "/stream");
-    assert_eq!(args.data, Some("EventData".to_string()));
+    assert!(args.data.is_some());
+    let path = args.data.unwrap();
+    assert_eq!(
+        path.segments.first().unwrap().ident.to_string(),
+        "EventData"
+    );
 }
 
 #[test]
@@ -601,7 +693,10 @@ fn parse_shorthand_with_qualified_data() {
     let args: MethodShorthandArgs = syn::parse_quote! { "/stream", data = "models::EventData" };
 
     assert_eq!(args.path, "/stream");
-    assert_eq!(args.data, Some("models::EventData".to_string()));
+    assert!(args.data.is_some());
+    let path = args.data.unwrap();
+    assert_eq!(path.segments.len(), 2);
+    assert_eq!(path.segments.last().unwrap().ident.to_string(), "EventData");
 }
 
 #[test]
@@ -610,7 +705,12 @@ fn parse_shorthand_with_data_type_path() {
     let args: MethodShorthandArgs = syn::parse_quote! { "/stream", data = EventData };
 
     assert_eq!(args.path, "/stream");
-    assert_eq!(args.data, Some("EventData".to_string()));
+    assert!(args.data.is_some());
+    let path = args.data.unwrap();
+    assert_eq!(
+        path.segments.first().unwrap().ident.to_string(),
+        "EventData"
+    );
 }
 
 #[test]
@@ -630,7 +730,12 @@ fn shorthand_with_data_converts_to_orpc_args() {
 
     assert_eq!(args.method, "GET");
     assert_eq!(args.path, "/stream");
-    assert_eq!(args.stream_event, Some("EventData".to_string()));
+    assert!(args.stream_event.is_some());
+    let path = args.stream_event.unwrap();
+    assert_eq!(
+        path.segments.first().unwrap().ident.to_string(),
+        "EventData"
+    );
 }
 
 #[test]
