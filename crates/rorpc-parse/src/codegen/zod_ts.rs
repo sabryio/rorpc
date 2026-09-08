@@ -529,7 +529,7 @@ fn innermost_custom_name(ty: &syn::Type) -> Option<String> {
 /// assert_eq!(rust_type_to_ts_schema("Json<Vec<Planet>>"), "z.array(PlanetSchema)");
 /// assert_eq!(rust_type_to_ts_schema("Result<Json<Planet>, E>"), "PlanetSchema");
 /// assert_eq!(rust_type_to_ts_schema("String"), "z.string()");
-/// assert_eq!(rust_type_to_ts_schema("()"), "");
+/// assert_eq!(rust_type_to_ts_schema("()"), "z.void()");
 /// ```
 pub fn rust_type_to_ts_schema(raw: &str) -> String {
     let raw = raw.replace(' ', "");
@@ -558,7 +558,8 @@ pub fn rust_type_to_ts_schema(raw: &str) -> String {
 /// Map a bare type name to its Zod schema reference.
 fn type_name_to_zod_ref(type_name: &str) -> String {
     match type_name {
-        "()" | "" => String::new(),
+        "()" => "z.void()".to_string(),
+        "" => String::new(),
         "String" | "str" => "z.string()".to_string(),
         "bool" => "z.boolean()".to_string(),
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
@@ -674,7 +675,7 @@ mod runtime_conversion_tests {
 
     #[test]
     fn unit_type() {
-        assert_eq!(rust_type_to_ts_schema("()"), "");
+        assert_eq!(rust_type_to_ts_schema("()"), "z.void()");
     }
 
     #[test]

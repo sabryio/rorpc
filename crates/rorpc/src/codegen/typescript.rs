@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn unit_type() {
-        assert_eq!(rust_type_to_ts_schema("()"), "");
+        assert_eq!(rust_type_to_ts_schema("()"), "z.void()");
     }
 
     #[test]
