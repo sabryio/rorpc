@@ -122,7 +122,7 @@ fn zod_schema_for_type(ty: &syn::Type) -> String {
             | "u128" | "usize" => "z.number().int()".to_string(),
             "f32" | "f64" => "z.number()".to_string(),
             "bool" => "z.boolean()".to_string(),
-            "Value" => "z.any()".to_string(),
+            "Value" => "z.record(z.string(), z.unknown())".to_string(),
             // Custom types without #[derive(ZodTs)] cannot be introspected here —
             // the macro only sees the field's type name, not its internal fields.
             // Emit z.unknown() so the contract is always valid TypeScript.
@@ -225,7 +225,10 @@ mod tests {
     #[test]
     fn zod_schema_value() {
         let ty: syn::Type = syn::parse_str("serde_json::Value").unwrap();
-        assert_eq!(zod_schema_for_type(&ty), "z.any()");
+        assert_eq!(
+            zod_schema_for_type(&ty),
+            "z.record(z.string(), z.unknown())"
+        );
     }
 
     #[test]

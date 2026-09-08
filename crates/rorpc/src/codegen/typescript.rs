@@ -262,7 +262,10 @@ mod tests {
 
     #[test]
     fn serde_json_value() {
-        assert_eq!(rust_type_to_ts_schema("Json<serde_json::Value>"), "z.any()");
+        assert_eq!(
+            rust_type_to_ts_schema("Json<serde_json::Value>"),
+            "z.record(z.string(), z.unknown())"
+        );
     }
 
     #[test]
