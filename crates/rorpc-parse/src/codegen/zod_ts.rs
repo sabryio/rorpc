@@ -11,7 +11,7 @@ use syn::{Data, DeriveInput, Fields};
 use crate::{
     attributes::{ZodAttrs, apply_rename_rule, parse_serde_attrs, parse_zod_attrs},
     errors::Result,
-    types::{OPTION, VEC, is_primitive, try_extract_wrapper},
+    types::{HASHMAP, OPTION, VEC, is_primitive, try_extract_wrapper},
 };
 
 // ---------------------------------------------------------------------------
@@ -78,10 +78,25 @@ fn expand_named_struct(
             dep_type_names.push(bare.to_string());
         }
 
-        // Build FieldDef token: either zod_expr (primitive) or type_ref (custom)
-        let field_tok = if let Some(ref type_ref) = custom {
-            // Custom type — emit bare name as type_ref; zod_expr is empty.
-            // The resolution pass will replace type_ref with the correct schema name.
+        // Build FieldDef token: check containers with custom types first
+        let field_tok = if let Some(container_expr) = try_generate_container_with_custom_types(base_ty) {
+            // Vec<CustomType> or HashMap<K, V> with custom types
+            // Emit complete Zod expression with wrapper, not bare type_ref
+            let zod_expr = if is_opt {
+                format!("{}.optional()", container_expr)
+            } else {
+                container_expr
+            };
+            quote! {
+                ::rorpc::FieldDef {
+                    ts_name:   #ts_key,
+                    zod_expr:  #zod_expr,
+                    type_ref:  "",
+                    optional:  #is_opt,
+                }
+            }
+        } else if let Some(ref type_ref) = custom {
+            // Bare custom type — emit as type_ref for resolution pass
             let bare_ref = type_ref.rsplit("::").next().unwrap_or(type_ref.as_str());
             quote! {
                 ::rorpc::FieldDef {
@@ -94,8 +109,6 @@ fn expand_named_struct(
         } else {
             // Primitive — compute the full Zod expression now.
             let zod_expr = rust_type_to_zod(base_ty, &zod);
-            // Wrap in .optional() at the expression level so the resolver
-            // doesn't need to know about optionality for primitives.
             let zod_expr = if is_opt {
                 format!("{}.optional()", zod_expr)
             } else {
@@ -345,6 +358,19 @@ pub fn rust_type_to_zod(ty: &syn::Type, attrs: &ZodAttrs) -> String {
         return chain;
     }
 
+    // HashMap<K, V>
+    if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
+        let types = m.all_types();
+        if types.len() == 2 {
+            let key_schema = rust_type_to_zod(&types[0], &ZodAttrs::default());
+            let value_schema = rust_type_to_zod(&types[1], &ZodAttrs::default());
+            return format!("z.record({}, {})", key_schema, value_schema);
+        } else {
+            // Fallback for malformed HashMap
+            return "z.record(z.string(), z.unknown())".to_string();
+        }
+    }
+
     // Primitives — match on the final path segment ident
     if let syn::Type::Path(type_path) = ty
         && let Some(seg) = type_path.path.segments.last()
@@ -464,12 +490,73 @@ fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
     try_extract_wrapper(ty, OPTION)?.first_type()
 }
 
+/// Generate a complete Zod expression for containers wrapping custom types.
+///
+/// Returns `Some("z.array(ItemSchema)")` for `Vec<Item>` where Item is custom.
+/// Returns `Some("z.record(z.string(), ItemSchema)")` for `HashMap<String, Item>`.
+/// Returns `None` for fully primitive containers (handled by rust_type_to_zod)
+/// or bare types (handled by type_ref resolution).
+fn try_generate_container_with_custom_types(ty: &syn::Type) -> Option<String> {
+    // Vec<T> where T is custom
+    if let Some(m) = try_extract_wrapper(ty, VEC) {
+        if let Some(inner) = m.first_type() {
+            if let Some(custom_name) = innermost_custom_name(inner) {
+                let bare = custom_name.rsplit("::").next().unwrap_or(&custom_name);
+                return Some(format!("z.array({}Schema)", bare));
+            }
+        }
+    }
+
+    // HashMap<K, V> where K or V is custom
+    if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
+        let types = m.all_types();
+        if types.len() == 2 {
+            let key_has_custom = innermost_custom_name(&types[0]).is_some();
+            let val_has_custom = innermost_custom_name(&types[1]).is_some();
+
+            if key_has_custom || val_has_custom {
+                let key_expr = type_to_zod_or_schema_ref(&types[0]);
+                let val_expr = type_to_zod_or_schema_ref(&types[1]);
+                return Some(format!("z.record({}, {})", key_expr, val_expr));
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert a type to either a Zod primitive expression or a schema reference.
+///
+/// Used when building container expressions that mix primitives and custom types.
+fn type_to_zod_or_schema_ref(ty: &syn::Type) -> String {
+    if let Some(custom) = innermost_custom_name(ty) {
+        let bare = custom.rsplit("::").next().unwrap_or(&custom);
+        format!("{}Schema", bare)
+    } else {
+        rust_type_to_zod(ty, &ZodAttrs::default())
+    }
+}
+
 /// Return the simple name of the innermost non-primitive, non-wrapper type,
 /// for dependency tracking in `dependent_types()`.
 fn innermost_custom_name(ty: &syn::Type) -> Option<String> {
     // Strip Vec<T>
     if let Some(m) = try_extract_wrapper(ty, VEC) {
         return m.first_type().and_then(innermost_custom_name);
+    }
+    // Strip HashMap<K, V> — check both K and V for custom types
+    if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
+        // For HashMap, we need to check both key and value types
+        // Return the first custom type found
+        if let Some(key) = m.first_type() {
+            if let Some(name) = innermost_custom_name(key) {
+                return Some(name);
+            }
+        }
+        if let Some(value) = m.nth_type(1) {
+            return innermost_custom_name(value);
+        }
+        return None;
     }
     if is_primitive(ty) {
         return None;
@@ -571,6 +658,19 @@ fn type_name_to_zod_ref(type_name: &str) -> String {
         _ if type_name.starts_with("Vec<") && type_name.ends_with('>') => {
             let inner = &type_name[4..type_name.len() - 1];
             format!("z.array({})", type_name_to_zod_ref(inner))
+        }
+        _ if type_name.starts_with("HashMap<") && type_name.ends_with('>') => {
+            let inner = &type_name[8..type_name.len() - 1];
+            // Parse "K, V" from the HashMap generics
+            let parts: Vec<&str> = inner.splitn(2, ',').collect();
+            if parts.len() == 2 {
+                let key_schema = type_name_to_zod_ref(parts[0].trim());
+                let value_schema = type_name_to_zod_ref(parts[1].trim());
+                format!("z.record({}, {})", key_schema, value_schema)
+            } else {
+                // Fallback if we can't parse the generics
+                "z.record(z.string(), z.unknown())".to_string()
+            }
         }
         _ if type_name.starts_with("Option<") && type_name.ends_with('>') => {
             let inner = &type_name[7..type_name.len() - 1];
@@ -708,5 +808,57 @@ mod runtime_conversion_tests {
     fn base_type_strips_module_path() {
         assert_eq!(base_type_name("models::Planet"), "Planet");
         assert_eq!(base_type_name("crate::domain::Planet"), "Planet");
+    }
+
+    #[test]
+    fn hashmap_string_string() {
+        assert_eq!(
+            rust_type_to_ts_schema("HashMap<String, String>"),
+            "z.record(z.string(), z.string())"
+        );
+    }
+
+    #[test]
+    fn hashmap_with_custom_value() {
+        assert_eq!(
+            rust_type_to_ts_schema("HashMap<String, Planet>"),
+            "z.record(z.string(), PlanetSchema)"
+        );
+    }
+
+    #[test]
+    fn json_hashmap() {
+        assert_eq!(
+            rust_type_to_ts_schema("Json<HashMap<String, String>>"),
+            "z.record(z.string(), z.string())"
+        );
+    }
+
+    #[test]
+    fn vec_of_custom_type() {
+        let ty: syn::Type = syn::parse_str("Vec<Planet>").unwrap();
+        let expr = try_generate_container_with_custom_types(&ty);
+        assert_eq!(expr, Some("z.array(PlanetSchema)".to_string()));
+    }
+
+    #[test]
+    fn vec_of_primitive_returns_none() {
+        let ty: syn::Type = syn::parse_str("Vec<String>").unwrap();
+        let expr = try_generate_container_with_custom_types(&ty);
+        assert_eq!(expr, None);
+    }
+
+    #[test]
+    fn hashmap_with_custom_key() {
+        let ty: syn::Type = syn::parse_str("HashMap<Planet, String>").unwrap();
+        let expr = try_generate_container_with_custom_types(&ty);
+        assert_eq!(expr, Some("z.record(PlanetSchema, z.string())".to_string()));
+    }
+
+    #[test]
+    fn hashmap_fully_primitive_returns_none() {
+        let ty: syn::Type = syn::parse_str("HashMap<String, i32>").unwrap();
+        let expr = try_generate_container_with_custom_types(&ty);
+        assert_eq!(expr, None);
     }
 }

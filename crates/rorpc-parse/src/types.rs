@@ -19,8 +19,10 @@ pub const PATH: &str = "Path";
 pub const RESULT: &str = "Result";
 pub const OPTION: &str = "Option";
 pub const VEC: &str = "Vec";
+pub const HASHMAP: &str = "HashMap";
 pub const STATE: &str = "State";
 pub const SSE: &str = "Sse";
+pub const STATUSCODE: &str = "StatusCode";
 
 // ---------------------------------------------------------------------------
 // WrapperMatch — result of a successful wrapper extraction
@@ -56,6 +58,11 @@ impl<'a> WrapperMatch<'a> {
     /// The nth type argument (0-indexed).
     pub fn nth_type(&self, n: usize) -> Option<&'a Type> {
         self.generic_args.iter().filter_map(as_type_arg).nth(n)
+    }
+
+    /// All type arguments as a Vec.
+    pub fn all_types(&self) -> Vec<&'a Type> {
+        self.generic_args.iter().filter_map(as_type_arg).collect()
     }
 }
 
@@ -215,7 +222,7 @@ pub fn is_primitive_type_name(type_name: &str) -> bool {
 /// Returns `None` when the innermost resolved type is a primitive (no schema
 /// registration needed) or when the type cannot be unwrapped further.
 pub fn innermost_custom_type(ty: &Type) -> Option<&Type> {
-    for wrapper in &[RESULT, JSON, QUERY, OPTION, VEC, STATE, SSE] {
+    for wrapper in &[RESULT, JSON, QUERY, OPTION, VEC, HASHMAP, STATE, SSE] {
         if let Some(m) = try_extract_wrapper(ty, wrapper)
             && let Some(inner) = m.first_type()
         {
@@ -240,6 +247,13 @@ fn last_segment(ty: &Type) -> Option<&syn::PathSegment> {
 
 fn last_ident_str(ty: &Type) -> Option<String> {
     last_segment(ty).map(|seg| seg.ident.to_string())
+}
+
+/// Check if the last path segment ident matches the given name.
+///
+/// Used for types that don't have generic arguments (like StatusCode).
+pub fn last_ident_matches(ty: &Type, name: &str) -> bool {
+    last_ident_str(ty).as_deref() == Some(name)
 }
 
 fn span_of(ty: &Type) -> proc_macro2::Span {

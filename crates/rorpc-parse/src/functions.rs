@@ -9,7 +9,7 @@ use syn::{FnArg, ItemFn, ReturnType, Type, spanned::Spanned};
 
 use crate::{
     errors::{Error, Result},
-    types::{JSON, PATH, QUERY, RESULT, SSE, STATE, try_extract_wrapper},
+    types::{JSON, PATH, QUERY, RESULT, SSE, STATE, STATUSCODE, last_ident_matches, try_extract_wrapper},
 };
 
 // ---------------------------------------------------------------------------
@@ -118,7 +118,13 @@ fn extract_return_types(
         return Ok((unit, None, true));
     }
 
-    // Case 2: Json<T>
+    // Case 2: StatusCode — DELETE/PUT handlers with no response body
+    if last_ident_matches(ty, STATUSCODE) {
+        let unit: Type = syn::parse_quote! { () };
+        return Ok((unit, None, false));
+    }
+
+    // Case 3: Json<T>
     if let Some(m) = try_extract_wrapper(ty, JSON) {
         let output = m
             .first_type()
@@ -127,7 +133,7 @@ fn extract_return_types(
         return Ok((output, None, false));
     }
 
-    // Case 3: Result<Json<T>, E>
+    // Case 4: Result<Json<T>, E>
     if let Some(result_match) = try_extract_wrapper(ty, RESULT) {
         let first = result_match
             .first_type()
@@ -153,7 +159,7 @@ fn extract_return_types(
     Err(Error::invalid_handler_sig(
         ty.span(),
         fn_name,
-        "return type must be Json<T>, Result<Json<T>, E>, or Sse<impl Stream<...>>",
+        "return type must be Json<T>, Result<Json<T>, E>, StatusCode, or Sse<impl Stream<...>>",
     ))
 }
 
@@ -400,6 +406,25 @@ mod tests {
         };
         let s = sig(f);
         assert!(s.is_streaming);
+    }
+
+    #[test]
+    fn statuscode_return_maps_to_unit() {
+        let f: ItemFn = parse_quote! {
+            async fn handler() -> StatusCode {}
+        };
+        let s = sig(f);
+        assert_eq!(type_display(&s.output_type), "()");
+        assert!(!s.is_streaming);
+    }
+
+    #[test]
+    fn qualified_statuscode_works() {
+        let f: ItemFn = parse_quote! {
+            async fn handler() -> http::StatusCode {}
+        };
+        let s = sig(f);
+        assert_eq!(type_display(&s.output_type), "()");
     }
 
     // --- invalid signatures ---

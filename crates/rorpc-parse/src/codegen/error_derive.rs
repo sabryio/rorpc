@@ -112,6 +112,17 @@ fn zod_schema_for_type(ty: &syn::Type) -> String {
         return "z.array(z.unknown())".to_string();
     }
 
+    // HashMap<K, V>
+    if let Some(m) = try_extract_wrapper(ty, crate::types::HASHMAP) {
+        let types = m.all_types();
+        if types.len() == 2 {
+            let key_schema = zod_schema_for_type(&types[0]);
+            let value_schema = zod_schema_for_type(&types[1]);
+            return format!("z.record({}, {})", key_schema, value_schema);
+        }
+        return "z.record(z.string(), z.unknown())".to_string();
+    }
+
     // Path types — check final segment ident
     if let syn::Type::Path(type_path) = ty
         && let Some(seg) = type_path.path.segments.last()
@@ -211,6 +222,18 @@ mod tests {
     fn zod_schema_vec() {
         let ty: syn::Type = syn::parse_str("Vec<String>").unwrap();
         assert_eq!(zod_schema_for_type(&ty), "z.array(z.string())");
+    }
+
+    #[test]
+    fn zod_schema_hashmap() {
+        let ty: syn::Type = syn::parse_str("HashMap<String, String>").unwrap();
+        assert_eq!(zod_schema_for_type(&ty), "z.record(z.string(), z.string())");
+    }
+
+    #[test]
+    fn zod_schema_hashmap_with_int_value() {
+        let ty: syn::Type = syn::parse_str("HashMap<String, i32>").unwrap();
+        assert_eq!(zod_schema_for_type(&ty), "z.record(z.string(), z.number().int())");
     }
 
     #[test]

@@ -330,13 +330,32 @@ fn merge_path_and_query_schema(
     }
 }
 
-/// `"/planet/list"` → `"planet"`, `"/ping"` → `""`
+/// Extract namespace from path for contract grouping.
+///
+/// Uses the second path segment when the first is "api", otherwise uses the first segment.
+/// This handles the common REST pattern of `/api/resource` paths.
+///
+/// # Examples
+///
+/// - `/api/sessions` → `"sessions"`
+/// - `/api/campaigns/{id}` → `"campaigns"`
+/// - `/api/v1/sessions` → `"v1"` (versioned APIs)
+/// - `/sessions` → `"sessions"` (no api prefix)
+/// - `/ping` → `""` (single segment = root namespace)
 fn extract_namespace(path: &str) -> String {
-    let segments: Vec<&str> = path.trim_start_matches('/').splitn(3, '/').collect();
-    if segments.len() >= 2 {
-        segments[0].to_string()
-    } else {
-        String::new()
+    let segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty() && !s.starts_with('{'))
+        .collect();
+
+    match segments.as_slice() {
+        // /api/resource/... → "resource"
+        ["api", resource, ..] => resource.to_string(),
+        // /resource/... → "resource"
+        [resource, ..] if !resource.is_empty() => resource.to_string(),
+        // / or empty → ""
+        _ => String::new(),
     }
 }
 
@@ -369,10 +388,42 @@ mod tests {
     }
 
     #[test]
-    fn namespace_extraction() {
+    fn namespace_extraction_legacy_paths() {
         assert_eq!(extract_namespace("/planet/list"), "planet");
-        assert_eq!(extract_namespace("/ping"), "");
+        assert_eq!(extract_namespace("/ping"), "ping");
         assert_eq!(extract_namespace("/user/profile"), "user");
+    }
+
+    #[test]
+    fn namespace_extraction_api_prefix() {
+        assert_eq!(extract_namespace("/api/sessions"), "sessions");
+        assert_eq!(extract_namespace("/api/campaigns/{id}"), "campaigns");
+        assert_eq!(extract_namespace("/api/users/profile"), "users");
+    }
+
+    #[test]
+    fn namespace_extraction_versioned_api() {
+        assert_eq!(extract_namespace("/api/v1/sessions"), "v1");
+        assert_eq!(extract_namespace("/api/v2/users"), "v2");
+    }
+
+    #[test]
+    fn namespace_extraction_without_api() {
+        assert_eq!(extract_namespace("/sessions"), "sessions");
+        assert_eq!(extract_namespace("/campaigns"), "campaigns");
+    }
+
+    #[test]
+    fn namespace_extraction_root_handlers() {
+        // Single segment paths: no sub-resource → treated as their own namespace
+        assert_eq!(extract_namespace("/ping"), "ping");
+        assert_eq!(extract_namespace("/health"), "health");
+    }
+
+    #[test]
+    fn namespace_extraction_ignores_path_params() {
+        assert_eq!(extract_namespace("/api/sessions/{id}"), "sessions");
+        assert_eq!(extract_namespace("/{tenant}/sessions"), "sessions");
     }
 
     #[test]
@@ -495,5 +546,79 @@ mod tests {
         assert!(output.contains("ping"));
         assert!(output.contains("/planet/list"));
         assert!(output.contains("as const"));
+    }
+
+    #[test]
+    fn contract_namespaces_by_resource() {
+        // Bug-03 scenario: handlers with same names in different resource modules
+        let handlers = vec![
+            HandlerInfo {
+                name: "list",
+                method: "GET",
+                path: "/api/sessions",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Vec<Session>",
+                module_path: "sessions",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+            HandlerInfo {
+                name: "create",
+                method: "POST",
+                path: "/api/sessions",
+                input_type_name: "CreateSessionInput",
+                query_type_name: None,
+                output_type_name: "Session",
+                module_path: "sessions",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+            HandlerInfo {
+                name: "list",
+                method: "GET",
+                path: "/api/campaigns",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Vec<Campaign>",
+                module_path: "campaigns",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+            HandlerInfo {
+                name: "create",
+                method: "POST",
+                path: "/api/campaigns",
+                input_type_name: "CreateCampaignInput",
+                query_type_name: None,
+                output_type_name: "Campaign",
+                module_path: "campaigns",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+        ];
+        let output = generate_contract(&handlers, &[], &[], &std::collections::HashMap::new());
+        
+        // Should create separate namespaces
+        assert!(output.contains("sessions: {"));
+        assert!(output.contains("campaigns: {"));
+        
+        // Should NOT have duplicate keys in flat api namespace
+        assert!(!output.contains("api: {"));
+        
+        // Both resources should have their own list/create handlers
+        let sessions_idx = output.find("sessions: {").unwrap();
+        let campaigns_idx = output.find("campaigns: {").unwrap();
+        
+        // BTreeMap sorts alphabetically: campaigns < sessions
+        assert!(campaigns_idx < sessions_idx);
+        
+        // Verify both have list/create
+        assert!(output.contains("list:"));
+        assert!(output.contains("create:"));
     }
 }
