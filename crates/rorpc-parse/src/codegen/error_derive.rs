@@ -123,7 +123,11 @@ fn zod_schema_for_type(ty: &syn::Type) -> String {
             "f32" | "f64" => "z.number()".to_string(),
             "bool" => "z.boolean()".to_string(),
             "Value" => "z.any()".to_string(),
-            other => format!("{}Schema", other),
+            // Custom types without #[derive(ZodTs)] cannot be introspected here —
+            // the macro only sees the field's type name, not its internal fields.
+            // Emit z.unknown() so the contract is always valid TypeScript.
+            // To get a precise schema, add #[derive(ZodTs)] to the inner type.
+            _other => "z.unknown()".to_string(),
         };
     }
 
@@ -211,8 +215,11 @@ mod tests {
 
     #[test]
     fn zod_schema_custom_type() {
+        // Custom types without #[derive(ZodTs)] cannot be introspected at macro time —
+        // the macro only sees the type name, not its internal fields.
+        // Falls back to z.unknown() so generated contracts always compile.
         let ty: syn::Type = syn::parse_str("Planet").unwrap();
-        assert_eq!(zod_schema_for_type(&ty), "PlanetSchema");
+        assert_eq!(zod_schema_for_type(&ty), "z.unknown()");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { createORPCClient, isInferableError, ORPCError } from "@orpc/client";
+import { createORPCClient, isDefinedError, ORPCError } from "@orpc/client";
 import { OpenAPILink } from "@orpc/openapi/fetch";
 import { openapi } from "@orpc/openapi";
 import { oc, type RouterContractClient } from "@orpc/contract";
@@ -16,7 +16,13 @@ const PlanetSchema = z.object({
 // Contract router matching the Rust server's routes.
 // All procedures use POST — oRPC's OpenAPILink sends input in the request body.
 export const contract = {
-  ping: oc.meta(openapi({ method: "POST", path: "/ping" })).output(z.string()),
+  ping: oc.meta(openapi({ method: "POST", path: "/ping" }))
+    .errors({
+      RATE_LIMIT_EXCEEDED: {
+        data: z.object({ retryAfter: z.number() })
+      }
+    })
+    .output(z.string()),
 
   planet: {
     list: oc
@@ -35,16 +41,19 @@ export const contract = {
 
     find: oc
       .meta(openapi({ method: "POST", path: "/planet/find" }))
-      .errors({ NOT_FOUND: {} })
+      .errors({ 
+        NOT_FOUND: { data: z.string() },
+        STORE_ERROR: { data: z.string() }
+      })
       .input(z.object({ id: z.number() }))
       .output(PlanetSchema),
 
     create: oc
       .meta(openapi({ method: "POST", path: "/planet/create" }))
       .errors({
-        BAD_REQUEST: {},
-        INTERNAL_ERROR: {},
-        AUTHENTICATION_REQUIRED: {},
+        BAD_REQUEST: { data: z.string() },
+        INTERNAL_ERROR: { data: z.string() },
+        AUTHENTICATION_REQUIRED: { data: z.string() },
       })
       .input(z.object({ name: z.string(), description: z.string().optional() }))
       .output(PlanetSchema),
@@ -80,4 +89,4 @@ export const client: RouterContractClient<typeof contract> =
 
 export const orpc = createTanstackQueryUtils(client);
 
-export { isInferableError, ORPCError };
+export { isDefinedError, ORPCError };

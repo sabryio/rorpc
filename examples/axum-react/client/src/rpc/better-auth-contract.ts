@@ -1,4 +1,4 @@
-import { createORPCClient, isInferableError, ORPCError } from "@orpc/client";
+import { createORPCClient, isDefinedError, ORPCError } from "@orpc/client";
 import { type RouterContractClient } from "@orpc/contract";
 import { OpenAPILink } from "@orpc/openapi/fetch";
 import { createTanstackQueryUtils } from "@orpc/tanstack-query";
@@ -22,4 +22,4 @@ export const client: RouterContractClient<typeof contract> =
 
 export const orpc = createTanstackQueryUtils(client);
 
-export { isInferableError, ORPCError };
+export { isDefinedError, ORPCError };

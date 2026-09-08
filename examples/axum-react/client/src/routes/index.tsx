@@ -203,6 +203,12 @@ function PlanetFind() {
           onChange={(e) => setId(Number(e.target.value))}
           className="w-20 px-3 py-2 text-sm border border-neutral-300 rounded-md focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:border-transparent"
         />
+        <button
+          onClick={() => setId(999)}
+          className="px-3 py-2 text-xs bg-red-100 text-red-700 rounded-md hover:bg-red-200 transition-colors"
+        >
+          Test Store Error (999)
+        </button>
       </div>
 
       {isLoading && (

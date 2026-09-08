@@ -1,6 +1,5 @@
 import { Link, Outlet, createRootRoute } from "@tanstack/react-router";
 
-import { TanStackRouterDevtoolsPanel } from "@tanstack/react-router-devtools";
 import { TanStackDevtools } from "@tanstack/react-devtools";
 
 import { useSession, signOut } from "#/lib/auth-client";
@@ -18,18 +17,6 @@ function RootComponent() {
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         <Outlet />
       </main>
-
-      <TanStackDevtools
-        config={{
-          position: "bottom-right",
-        }}
-        plugins={[
-          {
-            name: "TanStack Router",
-            render: <TanStackRouterDevtoolsPanel />,
-          },
-        ]}
-      />
     </>
   );
 }

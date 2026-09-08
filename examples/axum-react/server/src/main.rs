@@ -89,61 +89,106 @@ struct ListPlanetsPaginatedOutput {
 
 // ===== Error =====
 
-#[derive(Debug, Serialize)]
-struct RpcError {
-    code: String,
-    message: String,
+// Simulated store error that can occur during database operations
+#[derive(Debug, thiserror::Error, Serialize)]
+#[error("store error: {0}")]
+struct StoreError(String);
+
+// Rate limit error with structured data
+#[derive(Debug, thiserror::Error, Serialize)]
+#[error("rate limit exceeded")]
+struct RateLimitError {
+    #[serde(rename = "retryAfter")]
+    retry_after: u64,
 }
 
-impl RpcError {
-    fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            code: "NOT_FOUND".into(),
-            message: message.into(),
-        }
-    }
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self {
-            code: "BAD_REQUEST".into(),
-            message: message.into(),
-        }
-    }
-    fn internal_error(message: impl Into<String>) -> Self {
-        Self {
-            code: "INTERNAL_ERROR".into(),
-            message: message.into(),
-        }
-    }
+#[derive(Debug, thiserror::Error, Serialize)]
+#[serde(tag = "code", content = "message")]
+enum RpcError {
+    #[error("not found: {0}")]
+    #[serde(rename = "NOT_FOUND")]
+    NotFound(String),
+
+    #[error("bad request: {0}")]
+    #[serde(rename = "BAD_REQUEST")]
+    BadRequest(String),
+
+    #[error("internal error: {0}")]
+    #[serde(rename = "INTERNAL_ERROR")]
+    InternalError(String),
+
+    #[error("store error: {0}")]
+    #[serde(rename = "STORE_ERROR")]
+    StoreError(#[from] StoreError),
+
+    #[error("rate limit exceeded")]
+    #[serde(rename = "RATE_LIMIT_EXCEEDED")]
+    RateLimitExceeded(#[from] RateLimitError),
 }
 
 impl IntoResponse for RpcError {
     fn into_response(self) -> Response {
-        let status = match self.code.as_str() {
-            "NOT_FOUND" => StatusCode::NOT_FOUND,
-            "BAD_REQUEST" => StatusCode::BAD_REQUEST,
-            "UNAUTHORIZED" => StatusCode::UNAUTHORIZED,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, code, data) = match &self {
+            RpcError::NotFound(msg) => (StatusCode::NOT_FOUND, "NOT_FOUND", serde_json::json!(msg)),
+            RpcError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                serde_json::json!(msg),
+            ),
+            RpcError::InternalError(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                serde_json::json!(msg),
+            ),
+            RpcError::StoreError(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "STORE_ERROR",
+                serde_json::json!(err.0),
+            ),
+            RpcError::RateLimitExceeded(err) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED",
+                serde_json::to_value(err).unwrap(),
+            ),
         };
-        (status, Json(self)).into_response()
+
+        // oRPC OpenAPI error format with defined flag
+        let error_response = serde_json::json!({
+            "defined": true,
+            "code": code,
+            "message": self.to_string(),
+            "data": data
+        });
+
+        (status, Json(error_response)).into_response()
     }
 }
 
 // ===== Handlers =====
 
 #[cfg(feature = "better-auth-integration")]
-async fn ping(session: OptionalSession<AppAuthSchema>) -> Json<String> {
+async fn ping(session: OptionalSession<AppAuthSchema>) -> Result<Json<String>, RpcError> {
+    // Simulate rate limiting - return error 30% of the time for testing
+    if rand::random::<f32>() < 0.3 {
+        return Err(RateLimitError { retry_after: 60 }.into());
+    }
+
     match session.0 {
-        Some(s) => Json(format!(
+        Some(s) => Ok(Json(format!(
             "pong (authenticated as {})",
             s.user.email().unwrap_or("unknown")
-        )),
-        None => Json("pong (anonymous)".to_string()),
+        ))),
+        None => Ok(Json("pong (anonymous)".to_string())),
     }
 }
 
 #[cfg(not(feature = "better-auth-integration"))]
-async fn ping() -> Json<String> {
-    Json("pong".to_string())
+async fn ping() -> Result<Json<String>, RpcError> {
+    // Simulate rate limiting - return error 30% of the time for testing
+    if rand::random::<f32>() < 0.3 {
+        return Err(RateLimitError { retry_after: 60 }.into());
+    }
+    Ok(Json("pong".to_string()))
 }
 
 #[cfg(feature = "better-auth-integration")]
@@ -216,13 +261,18 @@ async fn find_planet(
     _session: OptionalSession<AppAuthSchema>,
     Json(input): Json<FindPlanetInput>,
 ) -> Result<Json<Planet>, RpcError> {
+    // Simulate store error for planet ID 999
+    if input.id == 999 {
+        return Err(StoreError("Failed to connect to database".into()).into());
+    }
+
     state
         .planets
         .iter()
         .find(|p| p.id == input.id)
         .cloned()
         .map(Json)
-        .ok_or_else(|| RpcError::not_found(format!("Planet with id {} not found", input.id)))
+        .ok_or_else(|| RpcError::NotFound(format!("Planet with id {} not found", input.id)))
 }
 
 #[cfg(not(feature = "better-auth-integration"))]
@@ -230,13 +280,18 @@ async fn find_planet(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(input): Json<FindPlanetInput>,
 ) -> Result<Json<Planet>, RpcError> {
+    // Simulate store error for planet ID 999
+    if input.id == 999 {
+        return Err(StoreError("Failed to connect to database".into()).into());
+    }
+
     state
         .planets
         .iter()
         .find(|p| p.id == input.id)
         .cloned()
         .map(Json)
-        .ok_or_else(|| RpcError::not_found(format!("Planet with id {} not found", input.id)))
+        .ok_or_else(|| RpcError::NotFound(format!("Planet with id {} not found", input.id)))
 }
 
 #[cfg(feature = "better-auth-integration")]
@@ -249,11 +304,11 @@ async fn create_planet(
     let _user = session.user;
 
     if input.name.trim().is_empty() {
-        return Err(RpcError::bad_request("Planet name cannot be empty"));
+        return Err(RpcError::BadRequest("Planet name cannot be empty".into()));
     }
     if input.name.len() > 100 {
-        return Err(RpcError::internal_error(
-            "Planet name too long (max 100 characters)",
+        return Err(RpcError::InternalError(
+            "Planet name too long (max 100 characters)".into(),
         ));
     }
 
@@ -270,11 +325,11 @@ async fn create_planet(
     Json(input): Json<CreatePlanetInput>,
 ) -> Result<Json<Planet>, RpcError> {
     if input.name.trim().is_empty() {
-        return Err(RpcError::bad_request("Planet name cannot be empty"));
+        return Err(RpcError::BadRequest("Planet name cannot be empty".into()));
     }
     if input.name.len() > 100 {
-        return Err(RpcError::internal_error(
-            "Planet name too long (max 100 characters)",
+        return Err(RpcError::InternalError(
+            "Planet name too long (max 100 characters)".into(),
         ));
     }
 
@@ -421,7 +476,7 @@ fn sample_planets() -> Vec<Planet> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting server with Better Auth integration...");
-    
+
     let database = Database::connect("sqlite::memory:").await?;
     auth_schema::run_app_migrations(&database).await?;
 
@@ -512,8 +567,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting server without authentication");
-    println!("💡 To enable Better Auth, run: cargo run --bin server --features better-auth-integration");
-    
+    println!(
+        "💡 To enable Better Auth, run: cargo run --bin server --features better-auth-integration"
+    );
+
     let state = AppState {
         planets: Arc::new(sample_planets()),
     };
