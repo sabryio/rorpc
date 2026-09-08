@@ -23,7 +23,7 @@
 /// Exactly one of `zod_expr` or `type_ref` is non-empty:
 /// - `zod_expr` — complete primitive expression, e.g. `"z.string().min(1)"`.
 /// - `type_ref`  — bare Rust type name of a custom type, e.g. `"Session"`.
-///                 The resolution pass maps this to the correct TS schema name.
+///   The resolution pass maps this to the correct TS schema name.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldDef {
     /// TypeScript key (serde-renamed), e.g. `"sessionId"`.

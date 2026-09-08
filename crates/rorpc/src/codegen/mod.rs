@@ -140,17 +140,30 @@ impl ContractBuilder {
 
         let placeholder_schemas = generate_missing_placeholders(&self.handlers, &real_schema_types);
 
-        // Build schema_name_map: bare Rust type name → ts_schema_name.
-        // SchemaEntry.type_name is already the bare name (e.g. "Session"),
-        // ts_schema_name is already disambiguated (e.g. "TypesSessionSchema").
-        // When a collision exists and both entries share the same type_name,
-        // the last one written wins — contract resolution for that type will be
-        // ambiguous regardless (the caller cannot know which module is intended).
-        let schema_name_map: std::collections::HashMap<String, String> = self
+        // Build schema_name_map: both bare type name AND full module path → ts_schema_name.
+        // Full path entries (e.g. "crate::entities::Session" → "EntitiesSessionSchema") allow
+        // contract resolution to pick the correct schema when the handler's output_type_name
+        // contains a qualified path. Bare name entries serve as fallbacks.
+        let mut schema_name_map: std::collections::HashMap<String, String> = self
             .schemas
             .iter()
             .map(|s| (s.type_name.to_string(), s.ts_schema_name.clone()))
             .collect();
+        // Add full module path entries from resolved schemas (module_path is e.g.
+        // "issue1_duplicate_schemas::types::Session" → "TypesSessionSchema").
+        for s in &self.resolved_schemas {
+            if !s.module_path.is_empty() {
+                schema_name_map.insert(s.module_path.to_string(), s.ts_schema_name.clone());
+                // Also add path without crate prefix ("types::Session" → same)
+                // so handlers using "crate::types::Session" hit the right entry.
+                // "crate::types::Session" → strip "crate::" prefix variant
+                if let Some(without_first) =
+                    s.module_path.find("::").map(|i| &s.module_path[i + 2..])
+                {
+                    schema_name_map.insert(without_first.to_string(), s.ts_schema_name.clone());
+                }
+            }
+        }
 
         let contract_raw = contract::generate_contract(
             &self.handlers,
@@ -475,6 +488,7 @@ mod tests {
             vec![ir::ResolvedSchema {
                 ts_schema_name: "PlanetSchema".to_string(),
                 ts_type_name: "Planet".to_string(),
+                module_path: "",
                 def: ir::ResolvedDef::Object {
                     fields: vec![ir::ResolvedField {
                         ts_key: "id".to_string(),
@@ -518,6 +532,7 @@ mod tests {
         let resolved = vec![ir::ResolvedSchema {
             ts_schema_name: "SessionSchema".to_string(),
             ts_type_name: "Session".to_string(),
+            module_path: "",
             def: ir::ResolvedDef::Object {
                 fields: vec![ir::ResolvedField {
                     ts_key: "id".to_string(),
@@ -572,6 +587,7 @@ mod tests {
         let resolved = vec![ir::ResolvedSchema {
             ts_schema_name: "SessionSchema".to_string(),
             ts_type_name: "Session".to_string(),
+            module_path: "",
             def: ir::ResolvedDef::Object {
                 fields: vec![ir::ResolvedField {
                     ts_key: "id".to_string(),
@@ -689,6 +705,7 @@ mod tests {
         let resolved = vec![ir::ResolvedSchema {
             ts_schema_name: "SessionSchema".to_string(),
             ts_type_name: "Session".to_string(),
+            module_path: "",
             def: ir::ResolvedDef::Object {
                 fields: vec![ir::ResolvedField {
                     ts_key: "id".to_string(),

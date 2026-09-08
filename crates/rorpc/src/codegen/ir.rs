@@ -13,6 +13,10 @@ pub struct ResolvedSchema {
     /// Type alias name (schema name without the `Schema` suffix),
     /// e.g. `"TypesSession"`.
     pub ts_type_name: String,
+    /// Full Rust module path of the originating type,
+    /// e.g. `"issue1_duplicate_schemas::types::Session"`.
+    /// Empty string for fallback (Unknown) registrations.
+    pub module_path: &'static str,
     /// Shape of the schema.
     pub def: ResolvedDef,
 }

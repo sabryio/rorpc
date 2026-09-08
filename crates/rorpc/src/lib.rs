@@ -433,6 +433,7 @@ pub fn generate_contract() -> ContractBuilder {
             Some(codegen::ir::ResolvedSchema {
                 ts_schema_name: ts_schema_name.clone(),
                 ts_type_name,
+                module_path: reg.module_path,
                 def,
             })
         })

@@ -91,10 +91,17 @@ fn resolve_schema(
         array = true;
     }
 
-    // Try to resolve custom type: full path first, then bare name
+    // Try to resolve custom type using progressively shorter path prefixes.
+    // Handler metadata uses "crate::mod::Type", registry uses "crate_name::mod::Type".
+    // Strip segments from the left until we find a match or reach bare name.
     let bare = s.rsplit("::").next().unwrap_or(s);
+
+    // Build a list of candidate keys to try in order: full path, path without
+    // first segment (strips "crate" or crate name), bare name.
+    let without_first = s.find("::").map(|i| &s[i + 2..]);
     let resolved = schema_name_map
         .get(s)
+        .or_else(|| without_first.and_then(|p| schema_name_map.get(p)))
         .or_else(|| schema_name_map.get(bare))
         .cloned();
 
