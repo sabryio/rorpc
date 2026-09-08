@@ -11,8 +11,8 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream},
     Expr, ItemFn,
+    parse::{Parse, ParseStream},
 };
 
 /// Parsed arguments for `#[contract(...)]` attribute.
@@ -73,10 +73,13 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
             Component::ParentDir => {
                 // `..` — pop only if the top of the stack is a Normal segment.
                 // Never pop a Prefix ("D:") or RootDir ("\") entry.
-                let last_is_normal = stack.last().map(|s| {
-                    let p = std::path::Path::new(s);
-                    matches!(p.components().next(), Some(Component::Normal(_)))
-                }).unwrap_or(false);
+                let last_is_normal = stack
+                    .last()
+                    .map(|s| {
+                        let p = std::path::Path::new(s);
+                        matches!(p.components().next(), Some(Component::Normal(_)))
+                    })
+                    .unwrap_or(false);
                 if last_is_normal {
                     stack.pop();
                 }
@@ -189,15 +192,15 @@ mod tests {
 
     #[test]
     fn parse_string_literal() {
-        let args: ContractArgs = syn::parse2(quote! { "../client/bindings.ts" })
-            .expect("parse failed");
+        let args: ContractArgs =
+            syn::parse2(quote! { "../client/bindings.ts" }).expect("parse failed");
         assert!(args.path_expr.is_some());
     }
 
     #[test]
     fn parse_env_macro() {
-        let args: ContractArgs = syn::parse2(quote! { env!("RORPC_CLIENT_PATH") })
-            .expect("parse failed");
+        let args: ContractArgs =
+            syn::parse2(quote! { env!("RORPC_CLIENT_PATH") }).expect("parse failed");
         assert!(args.path_expr.is_some());
     }
 
@@ -225,8 +228,8 @@ mod tests {
         })
         .expect("parse failed");
 
-        let args: ContractArgs = syn::parse2(quote! { "../client/bindings.ts" })
-            .expect("parse failed");
+        let args: ContractArgs =
+            syn::parse2(quote! { "../client/bindings.ts" }).expect("parse failed");
         let expanded = expand_contract(args, func);
         let s = expanded.to_string();
 
@@ -243,8 +246,8 @@ mod tests {
         })
         .expect("parse failed");
 
-        let args: ContractArgs = syn::parse2(quote! { "../client/bindings.ts" })
-            .expect("parse failed");
+        let args: ContractArgs =
+            syn::parse2(quote! { "../client/bindings.ts" }).expect("parse failed");
         let expanded = expand_contract(args, func);
         let s = expanded.to_string();
 
@@ -265,7 +268,10 @@ mod tests {
     fn normalize_sibling_dir() {
         // CARGO_MANIFEST_DIR=/repo/server, client_path="../client/src/bindings.ts"
         let p = std::path::Path::new("/repo/server").join("../client/src/bindings.ts");
-        assert_eq!(normalize_path(&p), std::path::Path::new("/repo/client/src/bindings.ts"));
+        assert_eq!(
+            normalize_path(&p),
+            std::path::Path::new("/repo/client/src/bindings.ts")
+        );
     }
 
     #[test]
@@ -278,7 +284,10 @@ mod tests {
     #[test]
     fn normalize_curdirs_are_skipped() {
         let p = std::path::Path::new("/repo/./server/./crate").join("./out.ts");
-        assert_eq!(normalize_path(&p), std::path::Path::new("/repo/server/crate/out.ts"));
+        assert_eq!(
+            normalize_path(&p),
+            std::path::Path::new("/repo/server/crate/out.ts")
+        );
     }
 
     #[test]
@@ -294,11 +303,11 @@ mod tests {
     fn normalize_windows_preserves_drive_letter_shallow() {
         // The original bug: drive letter was wiped when RootDir cleared the stack.
         // CARGO_MANIFEST_DIR = D:\programming\Rust\rust-orpc\examples\axum-react\better-auth-integration
-        // client_path = "../../client/src/rpc/bindings.ts"
+        // client_path = "../client/src/rpc/bindings.ts"
         let base = std::path::Path::new(
             r"D:\programming\Rust\rust-orpc\examples\axum-react\better-auth-integration",
         );
-        let p = base.join("../../client/src/rpc/bindings.ts");
+        let p = base.join("../client/src/rpc/bindings.ts");
         assert_eq!(
             normalize_path(&p),
             std::path::Path::new(

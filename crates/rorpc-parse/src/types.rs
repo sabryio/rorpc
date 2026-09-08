@@ -154,6 +154,10 @@ pub fn is_primitive(ty: &Type) -> bool {
                     | "usize"
                     | "f32"
                     | "f64"
+                    // Well-known non-schema types that map to inline Zod expressions
+                    | "Uuid"
+                    | "DateTime"
+                    | "Value" // serde_json::Value
             )
         ),
         _ => false,

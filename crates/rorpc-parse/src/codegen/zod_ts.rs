@@ -14,8 +14,6 @@ use crate::{
     types::{OPTION, VEC, is_primitive, try_extract_wrapper},
 };
 
-const ZOD_IMPORT: &str = "import * as z from \"zod\";";
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -51,7 +49,7 @@ fn expand_named_struct(
     fields: &syn::FieldsNamed,
     _input: &DeriveInput,
 ) -> Result<TokenStream> {
-    let mut field_lines: Vec<String> = Vec::new();
+    let mut field_tokens: Vec<TokenStream> = Vec::new();
     let mut dep_type_names: Vec<String> = Vec::new();
 
     for field in &fields.named {
@@ -72,33 +70,56 @@ fn expand_named_struct(
             &field.ty
         };
 
-        let zod_expr = rust_type_to_zod(base_ty, &zod);
+        // Collect non-primitive custom types for dependency tracking
+        let custom = innermost_custom_name(base_ty);
+        if let Some(ref c) = custom {
+            // Store only the bare name for the dep list (last segment)
+            let bare = c.rsplit("::").next().unwrap_or(c.as_str());
+            dep_type_names.push(bare.to_string());
+        }
 
-        let final_expr = if is_opt {
-            format!("{}.optional()", zod_expr)
+        // Build FieldDef token: either zod_expr (primitive) or type_ref (custom)
+        let field_tok = if let Some(ref type_ref) = custom {
+            // Custom type — emit bare name as type_ref; zod_expr is empty.
+            // The resolution pass will replace type_ref with the correct schema name.
+            let bare_ref = type_ref.rsplit("::").next().unwrap_or(type_ref.as_str());
+            quote! {
+                ::rorpc::FieldDef {
+                    ts_name:   #ts_key,
+                    zod_expr:  "",
+                    type_ref:  #bare_ref,
+                    optional:  #is_opt,
+                }
+            }
         } else {
-            zod_expr
+            // Primitive — compute the full Zod expression now.
+            let zod_expr = rust_type_to_zod(base_ty, &zod);
+            // Wrap in .optional() at the expression level so the resolver
+            // doesn't need to know about optionality for primitives.
+            let zod_expr = if is_opt {
+                format!("{}.optional()", zod_expr)
+            } else {
+                zod_expr
+            };
+            quote! {
+                ::rorpc::FieldDef {
+                    ts_name:   #ts_key,
+                    zod_expr:  #zod_expr,
+                    type_ref:  "",
+                    optional:  #is_opt,
+                }
+            }
         };
 
-        field_lines.push(format!("  {}: {}", ts_key, final_expr));
-
-        // Collect non-primitive custom types for dependency tracking
-        if let Some(custom) = innermost_custom_name(base_ty) {
-            dep_type_names.push(custom);
-        }
+        field_tokens.push(field_tok);
     }
 
-    let schema_name = format!("{}Schema", name_str);
-    let ts_code = format!(
-        "{}\n\nexport const {} = z.object({{\n{}\n}});\n\nexport type {} = z.infer<typeof {}>;",
-        ZOD_IMPORT,
-        schema_name,
-        field_lines.join(",\n"),
+    Ok(emit_registration(
+        name,
         name_str,
-        schema_name,
-    );
-
-    Ok(emit_registration(name, name_str, &ts_code, &dep_type_names))
+        field_tokens,
+        &dep_type_names,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +135,7 @@ fn expand_enum(
     let serde_container = parse_serde_attrs(&input.attrs)?;
     let rename_all = serde_container.rename_all.as_deref();
 
-    let mut variant_schemas: Vec<String> = Vec::new();
+    let mut variant_tokens: Vec<TokenStream> = Vec::new();
 
     for variant in &data.variants {
         let serde_variant = parse_serde_attrs(&variant.attrs)?;
@@ -133,89 +154,94 @@ fn expand_enum(
                     .unwrap_or(raw_name)
             });
 
-        variant_schemas.push(generate_variant_ts(&variant_name, &variant.fields)?);
+        let kind_tok = generate_variant_def(&variant.fields)?;
+        variant_tokens.push(quote! {
+            ::rorpc::VariantDef {
+                serialized_name: #variant_name,
+                kind: #kind_tok,
+            }
+        });
     }
 
-    let schema_name = format!("{}Schema", name_str);
-    let variants_str = variant_schemas.join(",\n  ");
-    let ts_code = format!(
-        "{}\n\nexport const {} = z.union([\n  {}\n]);\n\nexport type {} = z.infer<typeof {}>;",
-        ZOD_IMPORT, schema_name, variants_str, name_str, schema_name,
-    );
-
-    Ok(emit_registration(name, name_str, &ts_code, &[]))
+    Ok(emit_enum_registration(name, name_str, variant_tokens))
 }
 
 // ---------------------------------------------------------------------------
-// Variant code generation
+// Variant code generation — returns a VariantKind TokenStream
 // ---------------------------------------------------------------------------
 
-fn generate_variant_ts(variant_name: &str, fields: &Fields) -> Result<String> {
+fn generate_variant_def(fields: &Fields) -> Result<TokenStream> {
     match fields {
-        Fields::Unit => Ok(format!("z.literal(\"{}\")", escape_str(variant_name))),
+        Fields::Unit => Ok(quote! { ::rorpc::VariantKind::Unit }),
 
         Fields::Unnamed(fields_unnamed) => {
             let count = fields_unnamed.unnamed.len();
             if count == 1 {
                 let field = fields_unnamed.unnamed.first().unwrap();
                 let zod = parse_zod_attrs(&field.attrs)?;
-                let schema = rust_type_to_zod(&field.ty, &zod);
-                Ok(format!(
-                    "z.object({{ {}: {} }})",
-                    ts_object_key(variant_name),
-                    schema
-                ))
+                if let Some(custom) = innermost_custom_name(&field.ty) {
+                    let bare_ref = custom.rsplit("::").next().unwrap_or(custom.as_str());
+                    Ok(quote! { ::rorpc::VariantKind::NewtypeRef { type_ref: #bare_ref } })
+                } else {
+                    let schema = rust_type_to_zod(&field.ty, &zod);
+                    Ok(quote! { ::rorpc::VariantKind::NewtypeZod { zod_expr: #schema } })
+                }
             } else {
-                let elements: Vec<String> = fields_unnamed
-                    .unnamed
-                    .iter()
-                    .map(|f| {
-                        let zod = parse_zod_attrs(&f.attrs)?;
-                        Ok(rust_type_to_zod(&f.ty, &zod))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(format!(
-                    "z.object({{ {}: z.tuple([{}]) }})",
-                    ts_object_key(variant_name),
-                    elements.join(", ")
-                ))
+                // Multi-field tuple variants not yet supported — emit Unknown
+                Ok(quote! { ::rorpc::VariantKind::Unit })
             }
         }
 
         Fields::Named(fields_named) => {
-            let field_schemas: Vec<String> = fields_named
-                .named
-                .iter()
-                .map(|field| {
-                    let field_name = field.ident.as_ref().unwrap().to_string();
-                    let serde = parse_serde_attrs(&field.attrs)?;
-                    if serde.skip {
-                        return Ok(String::new());
-                    }
-                    let ts_key = serde.rename.as_deref().unwrap_or(&field_name);
-                    let zod_attrs = parse_zod_attrs(&field.attrs)?;
-                    let is_opt = is_option_type(&field.ty);
-                    let base_ty = if is_opt {
-                        option_inner(&field.ty).unwrap_or(&field.ty)
-                    } else {
-                        &field.ty
-                    };
-                    let schema = rust_type_to_zod(base_ty, &zod_attrs);
-                    let final_schema = if is_opt {
-                        format!("{}.optional()", schema)
-                    } else {
-                        schema
-                    };
-                    Ok(format!("{}: {}", ts_key, final_schema))
-                })
-                .filter(|r| r.as_deref().map(|s| !s.is_empty()).unwrap_or(true))
-                .collect::<Result<Vec<_>>>()?;
+            let mut field_tokens: Vec<TokenStream> = Vec::new();
+            for field in &fields_named.named {
+                let field_name = field.ident.as_ref().unwrap().to_string();
+                let serde = parse_serde_attrs(&field.attrs)?;
+                if serde.skip {
+                    continue;
+                }
+                let ts_key = serde.rename.as_deref().unwrap_or(&field_name);
+                let zod_attrs = parse_zod_attrs(&field.attrs)?;
+                let is_opt = is_option_type(&field.ty);
+                let base_ty = if is_opt {
+                    option_inner(&field.ty).unwrap_or(&field.ty)
+                } else {
+                    &field.ty
+                };
 
-            Ok(format!(
-                "z.object({{ {}: z.object({{ {} }}) }})",
-                ts_object_key(variant_name),
-                field_schemas.join(", ")
-            ))
+                let field_tok = if let Some(custom) = innermost_custom_name(base_ty) {
+                    let bare_ref = custom.rsplit("::").next().unwrap_or(custom.as_str());
+                    quote! {
+                        ::rorpc::FieldDef {
+                            ts_name:  #ts_key,
+                            zod_expr: "",
+                            type_ref: #bare_ref,
+                            optional: #is_opt,
+                        }
+                    }
+                } else {
+                    let zod_expr = rust_type_to_zod(base_ty, &zod_attrs);
+                    let zod_expr = if is_opt {
+                        format!("{}.optional()", zod_expr)
+                    } else {
+                        zod_expr
+                    };
+                    quote! {
+                        ::rorpc::FieldDef {
+                            ts_name:  #ts_key,
+                            zod_expr: #zod_expr,
+                            type_ref: "",
+                            optional: #is_opt,
+                        }
+                    }
+                };
+                field_tokens.push(field_tok);
+            }
+            Ok(quote! {
+                ::rorpc::VariantKind::Struct {
+                    fields: &[ #(#field_tokens),* ]
+                }
+            })
         }
     }
 }
@@ -224,30 +250,59 @@ fn generate_variant_ts(variant_name: &str, fields: &Fields) -> Result<String> {
 // inventory::submit! emission
 // ---------------------------------------------------------------------------
 
+/// Emit the `inventory::submit!` block for a type.
+///
+/// `items`    — `FieldDef` tokens for structs, `VariantDef` tokens for enums.
+/// `is_enum`  — selects `SchemaDef::Enum` vs `SchemaDef::Object`.
 fn emit_registration(
     name: &syn::Ident,
     name_str: &str,
-    ts_code: &str,
+    items: Vec<TokenStream>,
     dep_type_names: &[String],
 ) -> TokenStream {
     let dep_strs: Vec<&str> = dep_type_names.iter().map(String::as_str).collect();
 
     quote! {
         impl #name {
-            pub fn zod_ts() -> String {
-                #ts_code.to_string()
-            }
-
             pub fn dependent_types() -> Vec<&'static str> {
                 vec![#(#dep_strs),*]
             }
         }
 
         const _: () = {
+            static __FIELDS: &[::rorpc::FieldDef] = &[ #(#items),* ];
             ::rorpc::inventory::submit! {
                 ::rorpc::SchemaRegistration {
                     type_name: #name_str,
-                    zod_ts: #name::zod_ts,
+                    module_path: concat!(module_path!(), "::", #name_str),
+                    schema_def: ::rorpc::SchemaDef::Object { fields: __FIELDS },
+                    dependent_types: #name::dependent_types,
+                }
+            }
+        };
+    }
+}
+
+/// Emit the `inventory::submit!` block for an enum type.
+fn emit_enum_registration(
+    name: &syn::Ident,
+    name_str: &str,
+    items: Vec<TokenStream>,
+) -> TokenStream {
+    quote! {
+        impl #name {
+            pub fn dependent_types() -> Vec<&'static str> {
+                vec![]
+            }
+        }
+
+        const _: () = {
+            static __VARIANTS: &[::rorpc::VariantDef] = &[ #(#items),* ];
+            ::rorpc::inventory::submit! {
+                ::rorpc::SchemaRegistration {
+                    type_name: #name_str,
+                    module_path: concat!(module_path!(), "::", #name_str),
+                    schema_def: ::rorpc::SchemaDef::Enum { variants: __VARIANTS },
                     dependent_types: #name::dependent_types,
                 }
             }
@@ -419,37 +474,29 @@ fn innermost_custom_name(ty: &syn::Type) -> Option<String> {
     if is_primitive(ty) {
         return None;
     }
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-    {
-        let name = seg.ident.to_string();
-        // Exclude Value (serde_json) from dependency tracking
-        if name == "Value" {
+    if let syn::Type::Path(tp) = ty {
+        // Extract full path by joining all segments
+        let segments: Vec<String> = tp
+            .path
+            .segments
+            .iter()
+            .map(|seg| seg.ident.to_string())
+            .collect();
+
+        if segments.is_empty() {
             return None;
         }
-        return Some(name);
+
+        let last = segments.last().unwrap();
+        // Exclude Value (serde_json) from dependency tracking
+        if last == "Value" {
+            return None;
+        }
+
+        // Return full path joined with ::
+        return Some(segments.join("::"));
     }
     None
-}
-
-fn ts_object_key(name: &str) -> String {
-    let valid = !name.is_empty()
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
-    if valid {
-        name.to_string()
-    } else {
-        format!("\"{}\"", escape_str(name))
-    }
-}
-
-fn escape_str(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---------------------------------------------------------------------------

@@ -7,10 +7,16 @@ use super::HandlerInfo;
 use std::collections::BTreeMap;
 
 /// Generate the `export const contract = { ... } as const` TypeScript block.
+///
+/// `schema_name_map` maps bare Rust type names (e.g. `"Session"`) to their
+/// resolved TypeScript schema names (e.g. `"TypesSessionSchema"`). Built from
+/// `ResolvedSchema` in the caller. Used to resolve handler input/output types
+/// that reference disambiguated schemas.
 pub fn generate_contract(
     handlers: &[HandlerInfo],
     errors: &[super::ErrorInfo],
     schemas: &[super::SchemaEntry],
+    schema_name_map: &std::collections::HashMap<String, String>,
 ) -> String {
     let error_map: std::collections::HashMap<&str, &super::ErrorInfo> =
         errors.iter().map(|e| (e.type_name, e)).collect();
@@ -29,7 +35,7 @@ pub fn generate_contract(
             for h in handlers {
                 lines.push(format!(
                     "  {},",
-                    generate_procedure_entry(h, &error_map, schemas)
+                    generate_procedure_entry(h, &error_map, schemas, schema_name_map)
                 ));
             }
         } else {
@@ -37,7 +43,7 @@ pub fn generate_contract(
             for h in handlers {
                 lines.push(format!(
                     "    {},",
-                    generate_procedure_entry(h, &error_map, schemas)
+                    generate_procedure_entry(h, &error_map, schemas, schema_name_map)
                 ));
             }
             lines.push("  },".to_string());
@@ -51,10 +57,80 @@ pub fn generate_contract(
     lines.join("\n")
 }
 
+/// Resolve a Rust type string to a TypeScript schema expression.
+///
+/// For custom types, checks `schema_name_map` by full path then bare name so
+/// disambiguated names (e.g. `"TypesSessionSchema"`) are used when available.
+/// Falls back to `rust_type_to_ts_schema` for primitives and unknown types.
+fn resolve_schema(
+    type_name: &str,
+    schema_name_map: &std::collections::HashMap<String, String>,
+) -> String {
+    let cleaned = type_name.replace(' ', "");
+
+    // Fully unwrap all wrappers to reach the inner type string,
+    // tracking whether we need to wrap in z.array() at the end.
+    let mut s = cleaned.as_str();
+    let mut array = false;
+
+    // Result<T, E> → T
+    if s.starts_with("Result<")
+        && let Some(comma) = find_first_generic_comma(s)
+    {
+        s = &s[7..comma];
+    }
+
+    // Json<T> → T
+    if s.starts_with("Json<") && s.ends_with('>') {
+        s = &s[5..s.len() - 1];
+    }
+
+    // Vec<T> → T  (with array flag)
+    if s.starts_with("Vec<") && s.ends_with('>') {
+        s = &s[4..s.len() - 1];
+        array = true;
+    }
+
+    // Try to resolve custom type: full path first, then bare name
+    let bare = s.rsplit("::").next().unwrap_or(s);
+    let resolved = schema_name_map
+        .get(s)
+        .or_else(|| schema_name_map.get(bare))
+        .cloned();
+
+    if let Some(ts_name) = resolved {
+        if array {
+            format!("z.array({})", ts_name)
+        } else {
+            ts_name
+        }
+    } else {
+        // Primitive or unknown — delegate to the string-based converter
+        super::typescript::rust_type_to_ts_schema(type_name)
+    }
+}
+
+/// Find the comma index separating `Result<T, E>` at depth 0.
+fn find_first_generic_comma(s: &str) -> Option<usize> {
+    let start = s.find('<')? + 1;
+    let mut depth = 0usize;
+    for (i, ch) in s[start..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' if depth == 0 => return None,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some(start + i),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn generate_procedure_entry(
     handler: &HandlerInfo,
     error_map: &std::collections::HashMap<&str, &super::ErrorInfo>,
     schemas: &[super::SchemaEntry],
+    schema_name_map: &std::collections::HashMap<String, String>,
 ) -> String {
     let key = handler_key(handler.name);
     let method = handler.method;
@@ -68,7 +144,7 @@ fn generate_procedure_entry(
         } else {
             handler.input_type_name
         };
-        let schema = super::typescript::rust_type_to_ts_schema(type_name);
+        let schema = resolve_schema(type_name, schema_name_map);
         if schema.is_empty() {
             // No body/query schema — but still need .input() if path params exist
             let path_only =
@@ -91,7 +167,7 @@ fn generate_procedure_entry(
             // SSE streaming handler — output is an async iterator of the event type
             format!("asyncIteratorObject({}Schema)", event_type)
         } else {
-            super::typescript::rust_type_to_ts_schema(handler.output_type_name)
+            resolve_schema(handler.output_type_name, schema_name_map)
         };
         if schema.is_empty() {
             String::new()
@@ -313,7 +389,7 @@ mod tests {
 
         let schemas = vec![SchemaEntry {
             type_name: "FindPlanetQuery",
-            zod_ts: "export const FindPlanetQuerySchema = z.object({ id: z.number().int(), q: z.string().optional() });".to_string(),
+            ts_schema_name: "FindPlanetQuerySchema".to_string(),
         }];
 
         let merged =
@@ -353,7 +429,7 @@ mod tests {
                 path_param_types: "",
             },
         ];
-        let output = generate_contract(&handlers, &[], &[]);
+        let output = generate_contract(&handlers, &[], &[], &std::collections::HashMap::new());
         assert!(output.contains("listPlanets"));
         assert!(output.contains("ping"));
         assert!(output.contains("/planet/list"));

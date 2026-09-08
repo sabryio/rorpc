@@ -465,15 +465,12 @@ fn emit_schema_registrations(func: &ItemFn) -> TokenStream {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            let fallback = format!(
-                "z.unknown() /* add #[derive(ZodTs)] to {} for a real schema */",
-                name
-            );
             registrations.push(quote! {
                 ::rorpc::inventory::submit! {
                     ::rorpc::SchemaRegistration {
                         type_name: #name,
-                        zod_ts: || #fallback.to_string(),
+                        module_path: "",
+                        schema_def: ::rorpc::SchemaDef::Unknown,
                         dependent_types: || vec![],
                     }
                 }

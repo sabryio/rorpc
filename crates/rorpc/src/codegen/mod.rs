@@ -6,6 +6,7 @@
 //! - Type exports (`export type X = z.infer<typeof XSchema>`)
 
 pub mod contract;
+pub mod ir;
 pub mod typescript;
 
 use std::path::Path;
@@ -32,7 +33,7 @@ pub struct HandlerInfo {
 #[derive(Debug, Clone)]
 pub struct SchemaEntry {
     pub type_name: &'static str,
-    pub zod_ts: String,
+    pub ts_schema_name: String, // e.g., "SessionSchema", "EntitiesSessionSchema"
 }
 
 /// A single error variant for TypeScript `.errors({...})` generation.
@@ -62,14 +63,21 @@ pub struct ContractBuilder {
     handlers: Vec<HandlerInfo>,
     schemas: Vec<SchemaEntry>,
     errors: Vec<ErrorInfo>,
+    /// Fully resolved schemas ready for one-pass TypeScript emission.
+    resolved_schemas: Vec<ir::ResolvedSchema>,
 }
 
 impl ContractBuilder {
-    pub fn new(handlers: Vec<HandlerInfo>, schemas: Vec<SchemaEntry>) -> Self {
+    pub fn new(
+        handlers: Vec<HandlerInfo>,
+        schemas: Vec<SchemaEntry>,
+        resolved_schemas: Vec<ir::ResolvedSchema>,
+    ) -> Self {
         Self {
             handlers,
             schemas,
             errors: Vec::new(),
+            resolved_schemas,
         }
     }
 
@@ -98,17 +106,72 @@ impl ContractBuilder {
     pub fn generate(self) -> String {
         let imports = typescript::generate_imports();
 
-        // Collect type names that have real schemas (not fallbacks)
-        let real_schema_types: std::collections::HashSet<&str> = self
-            .schemas
-            .iter()
-            .filter(|s| !s.zod_ts.contains("z.unknown()"))
-            .map(|s| s.type_name)
+        // Collect type names that have real schemas — used by placeholder generator.
+        let real_schema_types: std::collections::HashSet<&str> =
+            self.schemas.iter().map(|s| s.type_name).collect();
+
+        // Emit resolved schemas — one pass over structured data, no string scanning.
+        let real_schemas = typescript::emit_resolved_schemas(&self.resolved_schemas);
+
+        // Build unambiguous rename map for the contract block.
+        // Collision cases (2+ targets mapping to the same bare name) are left as-is;
+        // the schema block will already use the correct disambiguated names.
+        let mut rename_groups: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for s in &self.resolved_schemas {
+            let default = format!("{}Schema", s.ts_type_name);
+            if s.ts_schema_name != default {
+                rename_groups
+                    .entry(default)
+                    .or_default()
+                    .push(s.ts_schema_name.clone());
+            }
+        }
+        let unambiguous_renames: Vec<(String, String)> = rename_groups
+            .into_iter()
+            .filter_map(|(old, targets)| {
+                if targets.len() == 1 {
+                    Some((old, targets.into_iter().next().unwrap()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        let real_schemas = typescript::generate_real_schemas(&self.schemas);
         let placeholder_schemas = generate_missing_placeholders(&self.handlers, &real_schema_types);
-        let contract = contract::generate_contract(&self.handlers, &self.errors, &self.schemas);
+
+        // Build schema_name_map: bare Rust type name → ts_schema_name.
+        // SchemaEntry.type_name is already the bare name (e.g. "Session"),
+        // ts_schema_name is already disambiguated (e.g. "TypesSessionSchema").
+        // When a collision exists and both entries share the same type_name,
+        // the last one written wins — contract resolution for that type will be
+        // ambiguous regardless (the caller cannot know which module is intended).
+        let schema_name_map: std::collections::HashMap<String, String> = self
+            .schemas
+            .iter()
+            .map(|s| (s.type_name.to_string(), s.ts_schema_name.clone()))
+            .collect();
+
+        let contract_raw = contract::generate_contract(
+            &self.handlers,
+            &self.errors,
+            &self.schemas,
+            &schema_name_map,
+        );
+
+        // Apply unambiguous renames to the contract string.
+        let contract = unambiguous_renames
+            .iter()
+            .fold(contract_raw, |text, (old, new)| {
+                [(")", ")"), (".", "."), (",", ","), ("\n", "\n")]
+                    .iter()
+                    .fold(text, |t, (suffix, new_suffix)| {
+                        t.replace(
+                            &format!("{}{}", old, suffix),
+                            &format!("{}{}", new, new_suffix),
+                        )
+                    })
+            });
 
         let schema_block = match (real_schemas.is_empty(), placeholder_schemas.is_empty()) {
             (true, true) => String::new(),
@@ -128,10 +191,17 @@ fn generate_missing_placeholders(
     handlers: &[HandlerInfo],
     real_schema_types: &std::collections::HashSet<&str>,
 ) -> String {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
 
-    let mut unique_types: BTreeSet<String> = BTreeSet::new();
+    // Track all type paths that normalize to the same name
+    let mut normalized_to_paths: HashMap<String, Vec<String>> = HashMap::new();
 
+    // Helper to normalize type names: strip module paths
+    fn normalize_type_name(s: &str) -> String {
+        s.rsplit("::").next().unwrap_or(s).to_string()
+    }
+
+    // First pass: collect all types and detect collisions
     for handler in handlers {
         let mut type_names = vec![handler.input_type_name, handler.output_type_name];
         if let Some(query_type) = handler.query_type_name {
@@ -139,13 +209,48 @@ fn generate_missing_placeholders(
         }
         for type_str in type_names {
             if !typescript::is_primitive_type_name(type_str) {
-                for t in extract_base_types(type_str) {
-                    if !real_schema_types.contains(t.as_str()) {
-                        unique_types.insert(t);
-                    }
+                for full_path in extract_base_types(type_str) {
+                    let normalized = normalize_type_name(&full_path);
+                    normalized_to_paths
+                        .entry(normalized)
+                        .or_default()
+                        .push(full_path);
                 }
             }
         }
+    }
+
+    // Second pass: decide which types need placeholders
+    let mut unique_types: BTreeSet<String> = BTreeSet::new();
+    let mut collision_warnings: Vec<String> = Vec::new();
+
+    for (normalized, paths) in &normalized_to_paths {
+        // Skip if there's already a real schema for this normalized name
+        if real_schema_types.contains(normalized.as_str()) {
+            continue;
+        }
+
+        // Detect collision: multiple different paths normalize to same name
+        if paths.len() > 1 {
+            // Sort and deduplicate paths
+            let unique_paths: BTreeSet<_> = paths.iter().collect();
+            if unique_paths.len() > 1 {
+                collision_warnings.push(format!(
+                    "// ⚠️  WARNING: Multiple types resolve to '{normalized}Schema': {}",
+                    unique_paths
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                collision_warnings.push(
+                    "//    Add #[derive(ZodTs)] to one of them, or rename them to avoid collision."
+                        .to_string(),
+                );
+            }
+        }
+
+        unique_types.insert(normalized.clone());
     }
 
     if unique_types.is_empty() {
@@ -157,6 +262,12 @@ fn generate_missing_placeholders(
             .to_string(),
         String::new(),
     ];
+
+    // Add collision warnings at the top
+    if !collision_warnings.is_empty() {
+        lines.extend(collision_warnings);
+        lines.push(String::new());
+    }
 
     for type_name in unique_types {
         let schema_name = typescript::to_schema_name(&type_name);
@@ -202,22 +313,32 @@ fn extract_base_types(type_str: &str) -> Vec<String> {
         inner
     };
 
+    // Helper function to normalize type names by stripping Rust module paths
+    // BUT preserve the original if it contains "::" for collision detection
+    let normalize_type = |s: String| -> String {
+        // If it has a path separator, keep only the final component
+        // "crate::types::Session" → "Session"
+        // "entities::Session" → "Session"
+        // But we return the original string so caller can check
+        s
+    };
+
     if inner.starts_with("Vec<") && inner.ends_with('>') {
         let elem = &inner[4..inner.len() - 1];
         if !typescript::is_primitive_type_name(elem) {
-            vec![elem.to_string()]
+            vec![normalize_type(elem.to_string())]
         } else {
             vec![]
         }
     } else if inner.starts_with("Option<") && inner.ends_with('>') {
         let elem = &inner[7..inner.len() - 1];
         if !typescript::is_primitive_type_name(elem) {
-            vec![elem.to_string()]
+            vec![normalize_type(elem.to_string())]
         } else {
             vec![]
         }
     } else if !typescript::is_primitive_type_name(&inner) && !inner.is_empty() && inner != "()" {
-        vec![inner]
+        vec![normalize_type(inner)]
     } else {
         vec![]
     }
@@ -244,7 +365,8 @@ mod tests {
 
     #[test]
     fn accepts_relative_paths_with_parent_dirs() {
-        let builder = ContractBuilder::new(vec![make_handler("ping", "GET", "/ping")], vec![]);
+        let builder =
+            ContractBuilder::new(vec![make_handler("ping", "GET", "/ping")], vec![], vec![]);
         // Should not panic - relative paths with .. are allowed for legitimate use cases
         // like frontend directories outside the Rust workspace
         let temp_dir = std::env::temp_dir();
@@ -256,34 +378,35 @@ mod tests {
     #[test]
     fn accepts_multiple_parent_dirs_in_path() {
         // Test that paths with multiple .. components work (e.g., frontend outside workspace)
-        let builder = ContractBuilder::new(
-            vec![make_handler("test", "GET", "/test")],
-            vec![],
-        );
-        
+        let builder =
+            ContractBuilder::new(vec![make_handler("test", "GET", "/test")], vec![], vec![]);
+
         let temp_dir = std::env::temp_dir();
         let test_file = temp_dir.join("rorpc-test-multiple-parents.ts");
-        
+
         // Create a nested directory structure to test ../../.. navigation
         let nested = temp_dir.join("a").join("b").join("c");
         std::fs::create_dir_all(&nested).ok();
-        
+
         // Use relative path with multiple .. to write outside nested dir
         let relative_from_nested = "../../../rorpc-test-multiple-parents.ts";
         let full_path = nested.join(relative_from_nested);
-        
+
         let result = builder.output(&full_path);
-        
+
         // Verify it works (doesn't reject with InvalidInput) - use as_ref to avoid move
-        let is_valid = result.as_ref().map(|_| true).unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
+        let is_valid = result
+            .as_ref()
+            .map(|_| true)
+            .unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
         assert!(is_valid, "Path with multiple .. should be accepted");
-        
+
         // If write succeeded, verify file was created in correct location
         if result.is_ok() {
             assert!(test_file.exists(), "File should exist at resolved path");
             std::fs::remove_file(test_file).ok();
         }
-        
+
         // Cleanup
         std::fs::remove_dir_all(temp_dir.join("a")).ok();
     }
@@ -294,11 +417,12 @@ mod tests {
         let builder = ContractBuilder::new(
             vec![make_handler("extreme", "GET", "/extreme")],
             vec![],
+            vec![],
         );
-        
+
         let temp_dir = std::env::temp_dir();
         let test_output = temp_dir.join("rorpc-deep-navigation-test.ts");
-        
+
         // Create very nested structure
         let deeply_nested = temp_dir
             .join("level1")
@@ -307,27 +431,34 @@ mod tests {
             .join("level4")
             .join("level5");
         std::fs::create_dir_all(&deeply_nested).ok();
-        
+
         // Navigate all the way back up
         let relative = "../../../../../rorpc-deep-navigation-test.ts";
         let path_from_deep = deeply_nested.join(relative);
-        
+
         let result = builder.output(&path_from_deep);
-        
+
         // Use as_ref to avoid move
-        let is_valid = result.as_ref().map(|_| true).unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
-        assert!(is_valid, "Deep parent navigation (../../../../..) should be accepted");
-        
+        let is_valid = result
+            .as_ref()
+            .map(|_| true)
+            .unwrap_or_else(|e| e.kind() != std::io::ErrorKind::InvalidInput);
+        assert!(
+            is_valid,
+            "Deep parent navigation (../../../../..) should be accepted"
+        );
+
         if result.is_ok() && test_output.exists() {
             std::fs::remove_file(test_output).ok();
         }
-        
+
         std::fs::remove_dir_all(temp_dir.join("level1")).ok();
     }
 
     #[test]
     fn generates_with_no_schemas() {
-        let builder = ContractBuilder::new(vec![make_handler("ping", "GET", "/ping")], vec![]);
+        let builder =
+            ContractBuilder::new(vec![make_handler("ping", "GET", "/ping")], vec![], vec![]);
         let output = builder.generate();
         assert!(output.contains("AUTO-GENERATED"));
         assert!(output.contains("ping"));
@@ -339,13 +470,275 @@ mod tests {
             vec![make_handler("list_planets", "POST", "/planet/list")],
             vec![SchemaEntry {
                 type_name: "Planet",
-                zod_ts: "export const PlanetSchema = z.object({ id: z.number().int() });"
-                    .to_string(),
+                ts_schema_name: "PlanetSchema".to_string(),
+            }],
+            vec![ir::ResolvedSchema {
+                ts_schema_name: "PlanetSchema".to_string(),
+                ts_type_name: "Planet".to_string(),
+                def: ir::ResolvedDef::Object {
+                    fields: vec![ir::ResolvedField {
+                        ts_key: "id".to_string(),
+                        zod_expr: "z.number().int()".to_string(),
+                    }],
+                },
             }],
         );
         let output = builder.generate();
         assert!(output.contains("PlanetSchema"));
         assert!(output.contains("z.object"));
         assert!(output.contains("listPlanets"));
+    }
+
+    // =========================================================================
+    // Collision Detection Tests
+    // =========================================================================
+
+    #[test]
+    fn test_no_duplicate_when_real_schema_exists() {
+        // Scenario: Session has #[derive(ZodTs)], handler uses it
+        // Expected: Only one SessionSchema (the real one), no placeholder
+        let handlers = vec![HandlerInfo {
+            name: "get_session",
+            method: "GET",
+            path: "/api/sessions/{id}",
+            input_type_name: "()",
+            query_type_name: None,
+            output_type_name: "Json<Session>",
+            module_path: "test",
+            error_type_name: None,
+            stream_event_type_name: None,
+            path_param_types: "Uuid",
+        }];
+
+        let schemas = vec![SchemaEntry {
+            type_name: "Session",
+            ts_schema_name: "SessionSchema".to_string(),
+        }];
+
+        let resolved = vec![ir::ResolvedSchema {
+            ts_schema_name: "SessionSchema".to_string(),
+            ts_type_name: "Session".to_string(),
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.uuid()".to_string(),
+                }],
+            },
+        }];
+
+        let builder = ContractBuilder::new(handlers, schemas, resolved);
+        let output = builder.generate();
+
+        // Should have exactly one SessionSchema definition
+        let session_schema_count = output.matches("export const SessionSchema").count();
+        assert_eq!(
+            session_schema_count, 1,
+            "Should have exactly one SessionSchema definition"
+        );
+
+        // Should NOT have placeholder/TODO comment
+        assert!(
+            !output.contains("TODO: add #[derive(ZodTs)] to Session"),
+            "Should not have placeholder comment for Session"
+        );
+
+        // Should have the real schema
+        assert!(output.contains("z.uuid()"));
+    }
+
+    #[test]
+    fn test_module_path_normalized() {
+        // Scenario: crate::types::Session with #[derive(ZodTs)]
+        // Handler uses types::Session
+        // Expected: No duplicate, both resolve to same schema
+        let handlers = vec![HandlerInfo {
+            name: "admin_list",
+            method: "GET",
+            path: "/api/admin/sessions",
+            input_type_name: "()",
+            query_type_name: None,
+            output_type_name: "Json<Vec<crate::types::Session>>",
+            module_path: "test",
+            error_type_name: None,
+            stream_event_type_name: None,
+            path_param_types: "",
+        }];
+
+        let schemas = vec![SchemaEntry {
+            type_name: "Session",
+            ts_schema_name: "SessionSchema".to_string(),
+        }];
+
+        let resolved = vec![ir::ResolvedSchema {
+            ts_schema_name: "SessionSchema".to_string(),
+            ts_type_name: "Session".to_string(),
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.uuid()".to_string(),
+                }],
+            },
+        }];
+
+        let builder = ContractBuilder::new(handlers, schemas, resolved);
+        let output = builder.generate();
+
+        // Should have exactly one SessionSchema
+        let session_schema_count = output.matches("export const SessionSchema").count();
+        assert_eq!(
+            session_schema_count, 1,
+            "Module paths should normalize to prevent duplicates"
+        );
+
+        // Should not have placeholder
+        assert!(!output.contains("TODO: add #[derive(ZodTs)] to Session"));
+    }
+
+    #[test]
+    fn test_collision_warning_for_different_types() {
+        // Scenario: crate::entities::Session and crate::types::Session
+        // Both have NO #[derive(ZodTs)]
+        // Expected: Warning about collision
+        let handlers = vec![
+            HandlerInfo {
+                name: "get_entity_session",
+                method: "GET",
+                path: "/api/entities/sessions/{id}",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Json<crate::entities::Session>",
+                module_path: "test",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "Uuid",
+            },
+            HandlerInfo {
+                name: "get_type_session",
+                method: "GET",
+                path: "/api/types/sessions/{id}",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Json<crate::types::Session>",
+                module_path: "test",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "Uuid",
+            },
+        ];
+
+        let schemas = vec![]; // No real schemas
+
+        let builder = ContractBuilder::new(handlers, schemas, vec![]);
+        let output = builder.generate();
+
+        // Should have collision warning
+        assert!(
+            output.contains("⚠️  WARNING: Multiple types resolve to 'SessionSchema'"),
+            "Should warn about collision"
+        );
+
+        assert!(
+            output.contains("crate::entities::Session") && output.contains("crate::types::Session"),
+            "Should list both conflicting types"
+        );
+
+        // Should still generate one placeholder
+        let session_schema_count = output.matches("export const SessionSchema").count();
+        assert_eq!(
+            session_schema_count, 1,
+            "Should generate one placeholder despite collision"
+        );
+    }
+
+    #[test]
+    fn test_collision_resolved_by_real_schema() {
+        // Scenario: crate::entities::Session (no ZodTs) and crate::types::Session (has ZodTs)
+        // Expected: No collision warning, uses real schema
+        let handlers = vec![
+            HandlerInfo {
+                name: "get_entity_session",
+                method: "GET",
+                path: "/api/entities/sessions/{id}",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Json<crate::entities::Session>",
+                module_path: "test",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "Uuid",
+            },
+            HandlerInfo {
+                name: "get_type_session",
+                method: "GET",
+                path: "/api/types/sessions/{id}",
+                input_type_name: "()",
+                query_type_name: None,
+                output_type_name: "Json<crate::types::Session>",
+                module_path: "test",
+                error_type_name: None,
+                stream_event_type_name: None,
+                path_param_types: "Uuid",
+            },
+        ];
+
+        let schemas = vec![SchemaEntry {
+            type_name: "Session",
+            ts_schema_name: "SessionSchema".to_string(),
+        }];
+
+        let resolved = vec![ir::ResolvedSchema {
+            ts_schema_name: "SessionSchema".to_string(),
+            ts_type_name: "Session".to_string(),
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.uuid()".to_string(),
+                }],
+            },
+        }];
+
+        let builder = ContractBuilder::new(handlers, schemas, resolved);
+        let output = builder.generate();
+
+        // Should NOT have collision warning (resolved by real schema)
+        assert!(
+            !output.contains("⚠️  WARNING: Multiple types resolve to 'SessionSchema'"),
+            "Should not warn when real schema exists"
+        );
+
+        // Should have exactly one schema (the real one)
+        let session_schema_count = output.matches("export const SessionSchema").count();
+        assert_eq!(session_schema_count, 1);
+
+        // Should be the real schema, not placeholder
+        assert!(output.contains("z.uuid()"));
+        assert!(!output.contains("z.unknown()"));
+    }
+
+    #[test]
+    fn test_vec_and_option_extract_inner_types() {
+        // Scenario: Handler returns Vec<Session> and Option<User>
+        // Expected: Both Session and User extracted for placeholder check
+        let handlers = vec![HandlerInfo {
+            name: "test",
+            method: "GET",
+            path: "/test",
+            input_type_name: "Json<Option<User>>",
+            query_type_name: None,
+            output_type_name: "Json<Vec<Session>>",
+            module_path: "test",
+            error_type_name: None,
+            stream_event_type_name: None,
+            path_param_types: "",
+        }];
+
+        let schemas = vec![]; // No real schemas
+
+        let builder = ContractBuilder::new(handlers, schemas, vec![]);
+        let output = builder.generate();
+
+        // Should generate placeholders for both
+        assert!(output.contains("SessionSchema = z.unknown()"));
+        assert!(output.contains("UserSchema = z.unknown()"));
     }
 }

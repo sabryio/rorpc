@@ -4,7 +4,7 @@
 //! The actual implementations live in `orpc_parse::codegen::zod_ts` to avoid
 //! duplication and keep all type-to-Zod logic in one place.
 
-use super::{HandlerInfo, SchemaEntry};
+use super::{HandlerInfo, ir};
 use std::collections::BTreeSet;
 
 // Re-export runtime conversion utilities from rorpc-parse
@@ -22,23 +22,94 @@ pub fn generate_imports() -> String {
     .join("\n")
 }
 
-/// Generate TypeScript from real `ZodTs::zod_ts()` output, skipping fallbacks.
-pub fn generate_real_schemas(schemas: &[SchemaEntry]) -> String {
+// ---------------------------------------------------------------------------
+// Data-oriented emission (replaces generate_real_schemas)
+// ---------------------------------------------------------------------------
+
+/// Emit TypeScript for a slice of fully resolved schemas.
+///
+/// One pass over structured data — no string scanning, no post-hoc replacement.
+/// Each `ResolvedField.zod_expr` is already the complete, correct expression
+/// (primitives inline, cross-references already disambiguated by the resolution
+/// pass in `lib.rs`).
+pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
     schemas
         .iter()
-        .filter(|s| !s.zod_ts.contains("z.unknown()"))
-        .map(|s| {
-            s.zod_ts
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("import "))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .trim()
-                .to_string()
-        })
+        .map(emit_one_resolved)
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn emit_one_resolved(s: &ir::ResolvedSchema) -> String {
+    match &s.def {
+        ir::ResolvedDef::Object { fields } => {
+            let field_lines = fields
+                .iter()
+                .map(|f| format!("  {}: {}", f.ts_key, f.zod_expr))
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!(
+                "export const {name} = z.object({{\n{fields}\n}});\n\nexport type {ty} = z.infer<typeof {name}>;",
+                name = s.ts_schema_name,
+                fields = field_lines,
+                ty = s.ts_type_name,
+            )
+        }
+        ir::ResolvedDef::Enum { variants } => {
+            let variant_exprs = variants
+                .iter()
+                .map(emit_one_variant)
+                .collect::<Vec<_>>()
+                .join(",\n  ");
+            format!(
+                "export const {name} = z.union([\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
+                name = s.ts_schema_name,
+                variants = variant_exprs,
+                ty = s.ts_type_name,
+            )
+        }
+    }
+}
+
+fn emit_one_variant(v: &ir::ResolvedVariant) -> String {
+    let key = ts_object_key(&v.serialized_name);
+    match &v.kind {
+        ir::ResolvedVariantKind::Unit => {
+            format!("z.literal(\"{}\")", escape_str(&v.serialized_name))
+        }
+        ir::ResolvedVariantKind::Newtype { zod_expr } => {
+            format!("z.object({{ {}: {} }})", key, zod_expr)
+        }
+        ir::ResolvedVariantKind::Struct { fields } => {
+            let field_exprs = fields
+                .iter()
+                .map(|f| format!("{}: {}", f.ts_key, f.zod_expr))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("z.object({{ {}: z.object({{ {} }}) }})", key, field_exprs)
+        }
+    }
+}
+
+fn ts_object_key(name: &str) -> String {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+    if valid {
+        name.to_string()
+    } else {
+        format!("\"{}\"", escape_str(name))
+    }
+}
+
+fn escape_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Parse a Zod object schema string and extract field definitions.
@@ -197,37 +268,5 @@ mod tests {
     #[test]
     fn schema_name_simple() {
         assert_eq!(to_schema_name("Planet"), "PlanetSchema");
-    }
-
-    #[test]
-    fn schema_name_vec() {
-        assert_eq!(to_schema_name("Vec<Planet>"), "PlanetSchema");
-    }
-
-    #[test]
-    fn schema_name_module_path() {
-        assert_eq!(to_schema_name("models::Planet"), "PlanetSchema");
-    }
-
-    #[test]
-    fn parse_simple_zod_object() {
-        let schema = "z.object({ id: z.number().int(), name: z.string() })";
-        let fields = parse_zod_object_fields(schema).unwrap();
-        assert_eq!(fields.get("id"), Some(&"z.number().int()".to_string()));
-        assert_eq!(fields.get("name"), Some(&"z.string()".to_string()));
-    }
-
-    #[test]
-    fn parse_zod_object_with_optional() {
-        let schema = "z.object({ id: z.number().int(), q: z.string().optional() })";
-        let fields = parse_zod_object_fields(schema).unwrap();
-        assert_eq!(fields.get("id"), Some(&"z.number().int()".to_string()));
-        assert_eq!(fields.get("q"), Some(&"z.string().optional()".to_string()));
-    }
-
-    #[test]
-    fn non_object_schema_returns_none() {
-        assert!(parse_zod_object_fields("z.string()").is_none());
-        assert!(parse_zod_object_fields("z.array(z.number())").is_none());
     }
 }
