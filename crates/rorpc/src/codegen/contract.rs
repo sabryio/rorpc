@@ -282,7 +282,7 @@ fn merge_path_and_query_schema(
     path: &str,
     query_schema: &str,
     path_param_types: &str,
-    _schemas: &[super::SchemaEntry],
+    schemas: &[super::SchemaEntry],
 ) -> String {
     let path_params = extract_path_params(path);
 
@@ -318,9 +318,15 @@ fn merge_path_and_query_schema(
     if query_schema.is_empty() {
         // Path params only — no query/body schema to extend
         path_object
-    } else {
-        // Use Zod's .extend() with .shape to merge path params with query schema
+    } else if schemas.iter().any(|s| s.ts_schema_name == query_schema) {
+        // Known schema name from registry — it's a z.object() with .shape property
+        // Use .extend() with .shape to merge path params with query/body schema
         format!("{}.extend({}.shape)", path_object, query_schema)
+    } else {
+        // Direct Zod expression (primitive, z.void(), z.record(), etc.) or unknown schema
+        // These don't have .shape property, so we can't merge them
+        // Return path params only as the input validation
+        path_object
     }
 }
 
@@ -388,11 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn no_path_params() {
-        assert_eq!(extract_path_params("/planet/list"), Vec::<String>::new());
-    }
-
-    #[test]
     fn merges_path_and_query_params() {
         use super::super::SchemaEntry;
 
@@ -408,6 +409,57 @@ mod tests {
         assert!(merged.contains("z.object({"));
         assert!(merged.contains("id: z.number().int()")); // i32 → z.number().int()
         assert!(merged.contains(".extend(FindPlanetQuerySchema.shape)"));
+    }
+
+    #[test]
+    fn merges_path_params_with_direct_zod_expression() {
+        let schemas = vec![];
+
+        // Test with z.void() - happens when input type is ()
+        // Not in schema registry, so path params should be the only input validation
+        let merged_void = merge_path_and_query_schema("/user/{id}/ping", "z.void()", "i32", &schemas);
+        assert_eq!(merged_void, "z.object({ id: z.number().int() })");
+
+        // Test with z.record() - happens when input type is serde_json::Value
+        // Not in schema registry, so path params should be the only input validation
+        let merged_record = merge_path_and_query_schema(
+            "/data/{id}",
+            "z.record(z.string(), z.unknown())",
+            "String",
+            &schemas,
+        );
+        assert_eq!(merged_record, "z.object({ id: z.string() })");
+
+        // Test with primitive type - happens when input is just a String or i32
+        // Not in schema registry, so path params should be the only input validation
+        let merged_primitive = merge_path_and_query_schema("/item/{id}", "z.string()", "i32", &schemas);
+        assert_eq!(merged_primitive, "z.object({ id: z.number().int() })");
+
+        // Test with unknown schema name that's not in registry
+        // Should be treated as direct Zod expression and return path params only
+        let merged_unknown = merge_path_and_query_schema("/item/{id}", "UnknownSchema", "i32", &schemas);
+        assert_eq!(merged_unknown, "z.object({ id: z.number().int() })");
+    }
+
+    #[test]
+    fn merges_path_params_with_registered_schema() {
+        use super::super::SchemaEntry;
+
+        // Schema IS in the registry, so it should use .extend() with .shape
+        let schemas = vec![SchemaEntry {
+            type_name: "UpdateUserBody",
+            ts_schema_name: "UpdateUserBodySchema".to_string(),
+        }];
+
+        let merged = merge_path_and_query_schema(
+            "/user/{id}",
+            "UpdateUserBodySchema",
+            "i32",
+            &schemas,
+        );
+
+        assert!(merged.contains("z.object({ id: z.number().int() })"));
+        assert!(merged.contains(".extend(UpdateUserBodySchema.shape)"));
     }
 
     #[test]

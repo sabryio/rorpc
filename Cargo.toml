@@ -11,7 +11,7 @@ exclude = ["examples/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 authors = ["Sabry Awad <dr.sabry1997@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -20,9 +20,9 @@ homepage = "https://github.com/sabryio/rorpc"
 
 [workspace.dependencies]
 # Internal crates
-rorpc = { path = "crates/rorpc", version = "0.1.8" }
-rorpc-macros = { path = "crates/rorpc-macros", version = "0.1.8" }
-rorpc-parse = { path = "crates/rorpc-parse", version = "0.1.8" }
+rorpc = { path = "crates/rorpc", version = "0.1.9" }
+rorpc-macros = { path = "crates/rorpc-macros", version = "0.1.9" }
+rorpc-parse = { path = "crates/rorpc-parse", version = "0.1.9" }
 
 # Proc-macro toolchain
 syn = { version = "3.0", features = ["full"] }
