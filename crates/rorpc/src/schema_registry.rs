@@ -35,6 +35,25 @@ pub struct FieldDef {
     pub optional: bool,
 }
 
+/// Serde enum representation strategy.
+///
+/// Corresponds to `#[serde(tag = "...", content = "...")]` and `#[serde(untagged)]`
+/// container attributes.
+#[derive(Debug, Clone, Copy)]
+pub enum EnumRepr {
+    /// Default: `{ "Variant": { fields } }` — no serde annotation
+    External,
+    /// `#[serde(tag = "t")]` — tag merged into fields: `{ "t": "Variant", ...fields }`
+    Internal { tag: &'static str },
+    /// `#[serde(tag = "t", content = "c")]` — tag + content: `{ "t": "Variant", "c": { fields } }`
+    Adjacent {
+        tag: &'static str,
+        content: &'static str,
+    },
+    /// `#[serde(untagged)]` — no discriminator: `{ fields }`
+    Untagged,
+}
+
 /// A single variant in an enum schema.
 #[derive(Debug, Clone, Copy)]
 pub struct VariantDef {
@@ -65,6 +84,7 @@ pub enum SchemaDef {
         fields: &'static [FieldDef],
     },
     Enum {
+        repr: EnumRepr,
         variants: &'static [VariantDef],
     },
     /// Used by handler-macro fallback registrations that have no structural

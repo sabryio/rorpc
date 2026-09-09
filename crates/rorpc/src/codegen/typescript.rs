@@ -56,18 +56,68 @@ fn emit_one_resolved(s: &ir::ResolvedSchema) -> String {
                 ty = s.ts_type_name,
             )
         }
-        ir::ResolvedDef::Enum { variants } => {
-            let variant_exprs = variants
-                .iter()
-                .map(emit_one_variant)
-                .collect::<Vec<_>>()
-                .join(",\n  ");
-            format!(
-                "export const {name} = z.union([\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
-                name = s.ts_schema_name,
-                variants = variant_exprs,
-                ty = s.ts_type_name,
-            )
+        ir::ResolvedDef::Enum { repr, variants } => {
+            // Branch on repr to emit the correct Zod construct
+            match repr {
+                ir::ResolvedEnumRepr::External => {
+                    // z.union([...]) — current behavior
+                    let variant_exprs = variants
+                        .iter()
+                        .map(|v| emit_variant_for_repr(v, repr))
+                        .collect::<Vec<_>>()
+                        .join(",\n  ");
+                    format!(
+                        "export const {name} = z.union([\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
+                        name = s.ts_schema_name,
+                        variants = variant_exprs,
+                        ty = s.ts_type_name,
+                    )
+                }
+                ir::ResolvedEnumRepr::Untagged => {
+                    // z.union([...]) — no discriminant wrapper
+                    let variant_exprs = variants
+                        .iter()
+                        .map(|v| emit_variant_for_repr(v, repr))
+                        .collect::<Vec<_>>()
+                        .join(",\n  ");
+                    format!(
+                        "export const {name} = z.union([\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
+                        name = s.ts_schema_name,
+                        variants = variant_exprs,
+                        ty = s.ts_type_name,
+                    )
+                }
+                ir::ResolvedEnumRepr::Internal { tag } => {
+                    // z.discriminatedUnion("<tag>", [...])
+                    let variant_exprs = variants
+                        .iter()
+                        .map(|v| emit_variant_for_repr(v, repr))
+                        .collect::<Vec<_>>()
+                        .join(",\n  ");
+                    format!(
+                        "export const {name} = z.discriminatedUnion(\"{tag}\", [\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
+                        name = s.ts_schema_name,
+                        tag = escape_str(tag),
+                        variants = variant_exprs,
+                        ty = s.ts_type_name,
+                    )
+                }
+                ir::ResolvedEnumRepr::Adjacent { tag, content: _ } => {
+                    // z.discriminatedUnion("<tag>", [...])
+                    let variant_exprs = variants
+                        .iter()
+                        .map(|v| emit_variant_for_repr(v, repr))
+                        .collect::<Vec<_>>()
+                        .join(",\n  ");
+                    format!(
+                        "export const {name} = z.discriminatedUnion(\"{tag}\", [\n  {variants}\n]);\n\nexport type {ty} = z.infer<typeof {name}>;",
+                        name = s.ts_schema_name,
+                        tag = escape_str(tag),
+                        variants = variant_exprs,
+                        ty = s.ts_type_name,
+                    )
+                }
+            }
         }
     }
 }
@@ -88,6 +138,127 @@ fn emit_one_variant(v: &ir::ResolvedVariant) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("z.object({{ {}: z.object({{ {} }}) }})", key, field_exprs)
+        }
+    }
+}
+
+/// Emit a variant according to its enum representation strategy.
+fn emit_variant_for_repr(v: &ir::ResolvedVariant, repr: &ir::ResolvedEnumRepr) -> String {
+    match repr {
+        ir::ResolvedEnumRepr::External => {
+            // External: current behavior via emit_one_variant
+            emit_one_variant(v)
+        }
+        ir::ResolvedEnumRepr::Untagged => {
+            // Untagged: no wrapper, emit the value directly
+            match &v.kind {
+                ir::ResolvedVariantKind::Unit => {
+                    // Unit → z.literal("name")
+                    format!("z.literal(\"{}\")", escape_str(&v.serialized_name))
+                }
+                ir::ResolvedVariantKind::Newtype { zod_expr } => {
+                    // Newtype → zod_expr directly (unwrapped)
+                    zod_expr.clone()
+                }
+                ir::ResolvedVariantKind::Struct { fields } => {
+                    // Struct → z.object({ fields })
+                    let field_exprs = fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.ts_key, f.zod_expr))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("z.object({{ {} }})", field_exprs)
+                }
+            }
+        }
+        ir::ResolvedEnumRepr::Internal { tag } => {
+            // Internal: tag merged into fields
+            let tag_key = ts_object_key(tag);
+            match &v.kind {
+                ir::ResolvedVariantKind::Unit => {
+                    // Unit → z.object({ tag: z.literal("name") })
+                    format!(
+                        "z.object({{ {}: z.literal(\"{}\") }})",
+                        tag_key,
+                        escape_str(&v.serialized_name)
+                    )
+                }
+                ir::ResolvedVariantKind::Newtype { zod_expr } => {
+                    // Newtype → merge tag with inner fields if possible, else .and()
+                    if let Some(field_map) = parse_zod_object_fields(zod_expr) {
+                        // Inner is z.object({...}) — merge tag into it
+                        let mut all_fields = vec![format!(
+                            "{}: z.literal(\"{}\")",
+                            tag_key,
+                            escape_str(&v.serialized_name)
+                        )];
+                        for (k, v) in field_map.iter() {
+                            all_fields.push(format!("{}: {}", k, v));
+                        }
+                        format!("z.object({{ {} }})", all_fields.join(", "))
+                    } else {
+                        // Not an object — use .and()
+                        format!(
+                            "z.object({{ {}: z.literal(\"{}\") }}).and({})",
+                            tag_key,
+                            escape_str(&v.serialized_name),
+                            zod_expr
+                        )
+                    }
+                }
+                ir::ResolvedVariantKind::Struct { fields } => {
+                    // Struct → z.object({ tag: z.literal("name"), ...fields })
+                    let mut all_exprs = vec![format!(
+                        "{}: z.literal(\"{}\")",
+                        tag_key,
+                        escape_str(&v.serialized_name)
+                    )];
+                    for f in fields {
+                        all_exprs.push(format!("{}: {}", f.ts_key, f.zod_expr));
+                    }
+                    format!("z.object({{ {} }})", all_exprs.join(", "))
+                }
+            }
+        }
+        ir::ResolvedEnumRepr::Adjacent { tag, content } => {
+            // Adjacent: { tag: "name", content: {...} } — unit variants omit content
+            let tag_key = ts_object_key(tag);
+            let content_key = ts_object_key(content);
+            match &v.kind {
+                ir::ResolvedVariantKind::Unit => {
+                    // Unit → z.object({ tag: z.literal("name") }) — no content field
+                    format!(
+                        "z.object({{ {}: z.literal(\"{}\") }})",
+                        tag_key,
+                        escape_str(&v.serialized_name)
+                    )
+                }
+                ir::ResolvedVariantKind::Newtype { zod_expr } => {
+                    // Newtype → z.object({ tag: z.literal("name"), content: zod_expr })
+                    format!(
+                        "z.object({{ {}: z.literal(\"{}\"), {}: {} }})",
+                        tag_key,
+                        escape_str(&v.serialized_name),
+                        content_key,
+                        zod_expr
+                    )
+                }
+                ir::ResolvedVariantKind::Struct { fields } => {
+                    // Struct → z.object({ tag: z.literal("name"), content: z.object({ fields }) })
+                    let field_exprs = fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.ts_key, f.zod_expr))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "z.object({{ {}: z.literal(\"{}\"), {}: z.object({{ {} }}) }})",
+                        tag_key,
+                        escape_str(&v.serialized_name),
+                        content_key,
+                        field_exprs
+                    )
+                }
+            }
         }
     }
 }
@@ -271,5 +442,224 @@ mod tests {
     #[test]
     fn schema_name_simple() {
         assert_eq!(to_schema_name("Planet"), "PlanetSchema");
+    }
+
+    // --- Enum representation tests (T006) ---
+
+    #[test]
+    fn external_unit_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "ping".to_string(),
+            kind: ir::ResolvedVariantKind::Unit,
+        };
+        let repr = ir::ResolvedEnumRepr::External;
+        assert_eq!(emit_variant_for_repr(&v, &repr), r#"z.literal("ping")"#);
+    }
+
+    #[test]
+    fn external_newtype_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "value".to_string(),
+            kind: ir::ResolvedVariantKind::Newtype {
+                zod_expr: "z.string()".to_string(),
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::External;
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ value: z.string() })"#
+        );
+    }
+
+    #[test]
+    fn external_struct_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "data".to_string(),
+            kind: ir::ResolvedVariantKind::Struct {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.number()".to_string(),
+                }],
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::External;
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ data: z.object({ id: z.number() }) })"#
+        );
+    }
+
+    #[test]
+    fn untagged_unit_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "ping".to_string(),
+            kind: ir::ResolvedVariantKind::Unit,
+        };
+        let repr = ir::ResolvedEnumRepr::Untagged;
+        assert_eq!(emit_variant_for_repr(&v, &repr), r#"z.literal("ping")"#);
+    }
+
+    #[test]
+    fn untagged_newtype_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "value".to_string(),
+            kind: ir::ResolvedVariantKind::Newtype {
+                zod_expr: "z.string()".to_string(),
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Untagged;
+        // Unwrapped — just the zod_expr
+        assert_eq!(emit_variant_for_repr(&v, &repr), "z.string()");
+    }
+
+    #[test]
+    fn untagged_struct_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "data".to_string(),
+            kind: ir::ResolvedVariantKind::Struct {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.number()".to_string(),
+                }],
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Untagged;
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ id: z.number() })"#
+        );
+    }
+
+    #[test]
+    fn internal_unit_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "ping".to_string(),
+            kind: ir::ResolvedVariantKind::Unit,
+        };
+        let repr = ir::ResolvedEnumRepr::Internal {
+            tag: "type".to_string(),
+        };
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ type: z.literal("ping") })"#
+        );
+    }
+
+    #[test]
+    fn internal_newtype_variant_with_object() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "data".to_string(),
+            kind: ir::ResolvedVariantKind::Newtype {
+                zod_expr: "z.object({ id: z.number(), name: z.string() })".to_string(),
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Internal {
+            tag: "type".to_string(),
+        };
+        // Should merge tag into the object fields
+        let result = emit_variant_for_repr(&v, &repr);
+        assert!(result.contains(r#"type: z.literal("data")"#));
+        assert!(result.contains("id: z.number()"));
+        assert!(result.contains("name: z.string()"));
+    }
+
+    #[test]
+    fn internal_newtype_variant_non_object() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "count".to_string(),
+            kind: ir::ResolvedVariantKind::Newtype {
+                zod_expr: "z.number()".to_string(),
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Internal {
+            tag: "type".to_string(),
+        };
+        // Should use .and() fallback
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ type: z.literal("count") }).and(z.number())"#
+        );
+    }
+
+    #[test]
+    fn internal_struct_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "user".to_string(),
+            kind: ir::ResolvedVariantKind::Struct {
+                fields: vec![
+                    ir::ResolvedField {
+                        ts_key: "id".to_string(),
+                        zod_expr: "z.number()".to_string(),
+                    },
+                    ir::ResolvedField {
+                        ts_key: "name".to_string(),
+                        zod_expr: "z.string()".to_string(),
+                    },
+                ],
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Internal {
+            tag: "type".to_string(),
+        };
+        let result = emit_variant_for_repr(&v, &repr);
+        assert!(result.contains(r#"type: z.literal("user")"#));
+        assert!(result.contains("id: z.number()"));
+        assert!(result.contains("name: z.string()"));
+    }
+
+    #[test]
+    fn adjacent_unit_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "ping".to_string(),
+            kind: ir::ResolvedVariantKind::Unit,
+        };
+        let repr = ir::ResolvedEnumRepr::Adjacent {
+            tag: "type".to_string(),
+            content: "data".to_string(),
+        };
+        // Unit → no content field
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ type: z.literal("ping") })"#
+        );
+    }
+
+    #[test]
+    fn adjacent_newtype_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "value".to_string(),
+            kind: ir::ResolvedVariantKind::Newtype {
+                zod_expr: "z.string()".to_string(),
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Adjacent {
+            tag: "type".to_string(),
+            content: "data".to_string(),
+        };
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ type: z.literal("value"), data: z.string() })"#
+        );
+    }
+
+    #[test]
+    fn adjacent_struct_variant() {
+        let v = ir::ResolvedVariant {
+            serialized_name: "user".to_string(),
+            kind: ir::ResolvedVariantKind::Struct {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.number()".to_string(),
+                }],
+            },
+        };
+        let repr = ir::ResolvedEnumRepr::Adjacent {
+            tag: "type".to_string(),
+            content: "data".to_string(),
+        };
+        assert_eq!(
+            emit_variant_for_repr(&v, &repr),
+            r#"z.object({ type: z.literal("user"), data: z.object({ id: z.number() }) })"#
+        );
     }
 }

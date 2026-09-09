@@ -79,50 +79,51 @@ fn expand_named_struct(
         }
 
         // Build FieldDef token: check containers with custom types first
-        let field_tok = if let Some(container_expr) = try_generate_container_with_custom_types(base_ty) {
-            // Vec<CustomType> or HashMap<K, V> with custom types
-            // Emit complete Zod expression with wrapper, not bare type_ref
-            let zod_expr = if is_opt {
-                format!("{}.optional()", container_expr)
+        let field_tok =
+            if let Some(container_expr) = try_generate_container_with_custom_types(base_ty) {
+                // Vec<CustomType> or HashMap<K, V> with custom types
+                // Emit complete Zod expression with wrapper, not bare type_ref
+                let zod_expr = if is_opt {
+                    format!("{}.optional()", container_expr)
+                } else {
+                    container_expr
+                };
+                quote! {
+                    ::rorpc::FieldDef {
+                        ts_name:   #ts_key,
+                        zod_expr:  #zod_expr,
+                        type_ref:  "",
+                        optional:  #is_opt,
+                    }
+                }
+            } else if let Some(ref type_ref) = custom {
+                // Bare custom type — emit as type_ref for resolution pass
+                let bare_ref = type_ref.rsplit("::").next().unwrap_or(type_ref.as_str());
+                quote! {
+                    ::rorpc::FieldDef {
+                        ts_name:   #ts_key,
+                        zod_expr:  "",
+                        type_ref:  #bare_ref,
+                        optional:  #is_opt,
+                    }
+                }
             } else {
-                container_expr
+                // Primitive — compute the full Zod expression now.
+                let zod_expr = rust_type_to_zod(base_ty, &zod);
+                let zod_expr = if is_opt {
+                    format!("{}.optional()", zod_expr)
+                } else {
+                    zod_expr
+                };
+                quote! {
+                    ::rorpc::FieldDef {
+                        ts_name:   #ts_key,
+                        zod_expr:  #zod_expr,
+                        type_ref:  "",
+                        optional:  #is_opt,
+                    }
+                }
             };
-            quote! {
-                ::rorpc::FieldDef {
-                    ts_name:   #ts_key,
-                    zod_expr:  #zod_expr,
-                    type_ref:  "",
-                    optional:  #is_opt,
-                }
-            }
-        } else if let Some(ref type_ref) = custom {
-            // Bare custom type — emit as type_ref for resolution pass
-            let bare_ref = type_ref.rsplit("::").next().unwrap_or(type_ref.as_str());
-            quote! {
-                ::rorpc::FieldDef {
-                    ts_name:   #ts_key,
-                    zod_expr:  "",
-                    type_ref:  #bare_ref,
-                    optional:  #is_opt,
-                }
-            }
-        } else {
-            // Primitive — compute the full Zod expression now.
-            let zod_expr = rust_type_to_zod(base_ty, &zod);
-            let zod_expr = if is_opt {
-                format!("{}.optional()", zod_expr)
-            } else {
-                zod_expr
-            };
-            quote! {
-                ::rorpc::FieldDef {
-                    ts_name:   #ts_key,
-                    zod_expr:  #zod_expr,
-                    type_ref:  "",
-                    optional:  #is_opt,
-                }
-            }
-        };
 
         field_tokens.push(field_tok);
     }
@@ -147,6 +148,21 @@ fn expand_enum(
 ) -> Result<TokenStream> {
     let serde_container = parse_serde_attrs(&input.attrs)?;
     let rename_all = serde_container.rename_all.as_deref();
+
+    // Derive EnumRepr from serde container attributes
+    let repr = if serde_container.untagged {
+        quote! { ::rorpc::EnumRepr::Untagged }
+    } else if let (Some(tag), Some(content)) = (&serde_container.tag, &serde_container.content) {
+        // Leak to &'static str for static storage
+        let tag_static: &'static str = Box::leak(tag.clone().into_boxed_str());
+        let content_static: &'static str = Box::leak(content.clone().into_boxed_str());
+        quote! { ::rorpc::EnumRepr::Adjacent { tag: #tag_static, content: #content_static } }
+    } else if let Some(tag) = &serde_container.tag {
+        let tag_static: &'static str = Box::leak(tag.clone().into_boxed_str());
+        quote! { ::rorpc::EnumRepr::Internal { tag: #tag_static } }
+    } else {
+        quote! { ::rorpc::EnumRepr::External }
+    };
 
     let mut variant_tokens: Vec<TokenStream> = Vec::new();
 
@@ -176,7 +192,7 @@ fn expand_enum(
         });
     }
 
-    Ok(emit_enum_registration(name, name_str, variant_tokens))
+    Ok(emit_enum_registration(name, name_str, repr, variant_tokens))
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +316,7 @@ fn emit_registration(
 fn emit_enum_registration(
     name: &syn::Ident,
     name_str: &str,
+    repr: TokenStream,
     items: Vec<TokenStream>,
 ) -> TokenStream {
     quote! {
@@ -315,7 +332,7 @@ fn emit_enum_registration(
                 ::rorpc::SchemaRegistration {
                     type_name: #name_str,
                     module_path: concat!(module_path!(), "::", #name_str),
-                    schema_def: ::rorpc::SchemaDef::Enum { variants: __VARIANTS },
+                    schema_def: ::rorpc::SchemaDef::Enum { repr: #repr, variants: __VARIANTS },
                     dependent_types: #name::dependent_types,
                 }
             }
@@ -362,8 +379,8 @@ pub fn rust_type_to_zod(ty: &syn::Type, attrs: &ZodAttrs) -> String {
     if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
         let types = m.all_types();
         if types.len() == 2 {
-            let key_schema = rust_type_to_zod(&types[0], &ZodAttrs::default());
-            let value_schema = rust_type_to_zod(&types[1], &ZodAttrs::default());
+            let key_schema = rust_type_to_zod(types[0], &ZodAttrs::default());
+            let value_schema = rust_type_to_zod(types[1], &ZodAttrs::default());
             return format!("z.record({}, {})", key_schema, value_schema);
         } else {
             // Fallback for malformed HashMap
@@ -498,25 +515,24 @@ fn option_inner(ty: &syn::Type) -> Option<&syn::Type> {
 /// or bare types (handled by type_ref resolution).
 fn try_generate_container_with_custom_types(ty: &syn::Type) -> Option<String> {
     // Vec<T> where T is custom
-    if let Some(m) = try_extract_wrapper(ty, VEC) {
-        if let Some(inner) = m.first_type() {
-            if let Some(custom_name) = innermost_custom_name(inner) {
-                let bare = custom_name.rsplit("::").next().unwrap_or(&custom_name);
-                return Some(format!("z.array({}Schema)", bare));
-            }
-        }
+    if let Some(m) = try_extract_wrapper(ty, VEC)
+        && let Some(inner) = m.first_type()
+        && let Some(custom_name) = innermost_custom_name(inner)
+    {
+        let bare = custom_name.rsplit("::").next().unwrap_or(&custom_name);
+        return Some(format!("z.array({}Schema)", bare));
     }
 
     // HashMap<K, V> where K or V is custom
     if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
         let types = m.all_types();
         if types.len() == 2 {
-            let key_has_custom = innermost_custom_name(&types[0]).is_some();
-            let val_has_custom = innermost_custom_name(&types[1]).is_some();
+            let key_has_custom = innermost_custom_name(types[0]).is_some();
+            let val_has_custom = innermost_custom_name(types[1]).is_some();
 
             if key_has_custom || val_has_custom {
-                let key_expr = type_to_zod_or_schema_ref(&types[0]);
-                let val_expr = type_to_zod_or_schema_ref(&types[1]);
+                let key_expr = type_to_zod_or_schema_ref(types[0]);
+                let val_expr = type_to_zod_or_schema_ref(types[1]);
                 return Some(format!("z.record({}, {})", key_expr, val_expr));
             }
         }
@@ -548,10 +564,10 @@ fn innermost_custom_name(ty: &syn::Type) -> Option<String> {
     if let Some(m) = try_extract_wrapper(ty, HASHMAP) {
         // For HashMap, we need to check both key and value types
         // Return the first custom type found
-        if let Some(key) = m.first_type() {
-            if let Some(name) = innermost_custom_name(key) {
-                return Some(name);
-            }
+        if let Some(key) = m.first_type()
+            && let Some(name) = innermost_custom_name(key)
+        {
+            return Some(name);
         }
         if let Some(value) = m.nth_type(1) {
             return innermost_custom_name(value);

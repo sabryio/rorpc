@@ -39,7 +39,9 @@ pub use codegen::ContractBuilder;
 pub use error_registry::{ErrorRegistration, ErrorVariant};
 pub use metadata::{HandlerMetadata, NamespaceMetadata};
 pub use registration::HandlerRegistration;
-pub use schema_registry::{FieldDef, SchemaDef, SchemaRegistration, VariantDef, VariantKind};
+pub use schema_registry::{
+    EnumRepr, FieldDef, SchemaDef, SchemaRegistration, VariantDef, VariantKind,
+};
 
 // Re-export inventory so users don't need to depend on it directly
 pub use inventory;
@@ -419,12 +421,34 @@ pub fn generate_contract() -> ContractBuilder {
                         fields: resolved_fields,
                     }
                 }
-                SchemaDef::Enum { variants } => {
+                SchemaDef::Enum { repr, variants } => {
+                    // Convert EnumRepr → ResolvedEnumRepr
+                    let resolved_repr = match repr {
+                        schema_registry::EnumRepr::External => {
+                            codegen::ir::ResolvedEnumRepr::External
+                        }
+                        schema_registry::EnumRepr::Internal { tag } => {
+                            codegen::ir::ResolvedEnumRepr::Internal {
+                                tag: tag.to_string(),
+                            }
+                        }
+                        schema_registry::EnumRepr::Adjacent { tag, content } => {
+                            codegen::ir::ResolvedEnumRepr::Adjacent {
+                                tag: tag.to_string(),
+                                content: content.to_string(),
+                            }
+                        }
+                        schema_registry::EnumRepr::Untagged => {
+                            codegen::ir::ResolvedEnumRepr::Untagged
+                        }
+                    };
+
                     let resolved_variants = variants
                         .iter()
                         .map(|v| resolve_variant(v, reg.module_path, &candidates_by_name))
                         .collect();
                     codegen::ir::ResolvedDef::Enum {
+                        repr: resolved_repr,
                         variants: resolved_variants,
                     }
                 }

@@ -116,8 +116,8 @@ fn zod_schema_for_type(ty: &syn::Type) -> String {
     if let Some(m) = try_extract_wrapper(ty, crate::types::HASHMAP) {
         let types = m.all_types();
         if types.len() == 2 {
-            let key_schema = zod_schema_for_type(&types[0]);
-            let value_schema = zod_schema_for_type(&types[1]);
+            let key_schema = zod_schema_for_type(types[0]);
+            let value_schema = zod_schema_for_type(types[1]);
             return format!("z.record({}, {})", key_schema, value_schema);
         }
         return "z.record(z.string(), z.unknown())".to_string();

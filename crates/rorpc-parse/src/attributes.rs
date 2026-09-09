@@ -23,6 +23,12 @@ pub struct SerdeAttrs {
     pub skip: bool,
     /// `#[serde(default)]`
     pub default: bool,
+    /// `#[serde(tag = "type")]` on enum containers
+    pub tag: Option<String>,
+    /// `#[serde(content = "data")]` on enum containers
+    pub content: Option<String>,
+    /// `#[serde(untagged)]` on enum containers
+    pub untagged: bool,
 }
 
 /// Parse all `#[serde(...)]` attributes from a slice, merging results.
@@ -49,6 +55,12 @@ pub fn parse_serde_attrs(attrs: &[Attribute]) -> Result<SerdeAttrs> {
                 if meta.input.peek(syn::Token![=]) {
                     let _: syn::Expr = meta.value()?.parse()?;
                 }
+            } else if meta.path.is_ident("tag") {
+                out.tag = Some(parse_lit_str_value(&meta)?);
+            } else if meta.path.is_ident("content") {
+                out.content = Some(parse_lit_str_value(&meta)?);
+            } else if meta.path.is_ident("untagged") {
+                out.untagged = true;
             } else {
                 // Unknown serde key — consume any value so the parser doesn't stall
                 skip_meta_value(&meta)?;
@@ -414,6 +426,42 @@ mod tests {
             struct S;
         };
         assert!(parse_serde_attrs(&attrs_of(input)).is_ok());
+    }
+
+    #[test]
+    fn serde_tag_only() {
+        let input: DeriveInput = parse_quote! {
+            #[serde(tag = "type")]
+            enum E {}
+        };
+        let attrs = parse_serde_attrs(&attrs_of(input)).unwrap();
+        assert_eq!(attrs.tag, Some("type".to_string()));
+        assert_eq!(attrs.content, None);
+        assert!(!attrs.untagged);
+    }
+
+    #[test]
+    fn serde_tag_and_content() {
+        let input: DeriveInput = parse_quote! {
+            #[serde(tag = "type", content = "data")]
+            enum E {}
+        };
+        let attrs = parse_serde_attrs(&attrs_of(input)).unwrap();
+        assert_eq!(attrs.tag, Some("type".to_string()));
+        assert_eq!(attrs.content, Some("data".to_string()));
+        assert!(!attrs.untagged);
+    }
+
+    #[test]
+    fn serde_untagged() {
+        let input: DeriveInput = parse_quote! {
+            #[serde(untagged)]
+            enum E {}
+        };
+        let attrs = parse_serde_attrs(&attrs_of(input)).unwrap();
+        assert!(attrs.untagged);
+        assert_eq!(attrs.tag, None);
+        assert_eq!(attrs.content, None);
     }
 
     #[test]

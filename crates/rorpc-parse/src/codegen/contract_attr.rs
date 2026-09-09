@@ -19,7 +19,7 @@ use syn::{
 ///
 /// Supports:
 /// - `#[contract]` — reads `[package.metadata.rorpc] client_path` from `Cargo.toml`,
-///                   falls back to `env!("RORPC_CLIENT_PATH")`
+///   falls back to `env!("RORPC_CLIENT_PATH")`
 /// - `#[contract("../client/bindings.ts")]` — string literal
 /// - `#[contract(env!("RORPC_CLIENT_PATH"))]` — environment variable
 /// - `#[contract(concat!(...))]` — concatenation expression
