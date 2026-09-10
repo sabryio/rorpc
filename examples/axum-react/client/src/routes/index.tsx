@@ -2,7 +2,7 @@ import {
   client,
   consumeAsyncIterator,
   getEventMeta,
-  isInferableError,
+  isDefinedError,
   orpc,
 } from "@/rpc/better-auth-contract";
 import {
@@ -82,7 +82,7 @@ function Home() {
 }
 
 function PingTest() {
-  const mutation = useMutation(orpc.ping.mutationOptions());
+  const mutation = useMutation(orpc.ping.ping.mutationOptions());
 
   return (
     <div className="bg-white border border-neutral-200 rounded-lg p-6">
@@ -219,7 +219,7 @@ function PlanetFind() {
 
       {error && (
         <div className="p-3 bg-red-50 border border-red-200 rounded text-sm text-red-800">
-          {isInferableError(error) ? (
+          {isDefinedError(error) ? (
             <>
               {error.code === "NOT_FOUND" && (
                 <div className="flex items-start gap-2">
@@ -325,7 +325,7 @@ function CreatePlanet() {
 
       {mutation.error && (
         <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
-          {isInferableError(mutation.error) ? (
+          {isDefinedError(mutation.error) ? (
             <>
               {mutation.error.code === "INTERNAL" && (
                 <div className="flex items-start gap-2 text-red-800">
@@ -407,7 +407,7 @@ function DeletePlanet() {
 
       {mutation.error && (
         <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-md">
-          {isInferableError(mutation.error) ? (
+          {isDefinedError(mutation.error) ? (
             <>
               {mutation.error.code === "NOT_FOUND" && (
                 <div className="flex items-start gap-2 text-red-800">
@@ -554,7 +554,7 @@ function StreamEvents() {
     abortRef.current = controller;
 
     try {
-      const iterator = await client.streamEvents(undefined, {
+      const iterator = await client.stream.streamEvents(undefined, {
         signal: controller.signal,
       });
       for await (const event of iterator) {
@@ -666,7 +666,7 @@ function StreamAsyncConsumeIterator() {
     setFinished(false);
     setStreaming(true);
 
-    const cancel = consumeAsyncIterator(client.streamEventsAsync(), {
+    const cancel = consumeAsyncIterator(client.stream.streamEventsAsync(), {
       onEvent: (event) => {
         const meta = getEventMeta(event);
         setEvents((prev) => [
@@ -792,7 +792,7 @@ function StreamAsyncStreamed() {
     isLoading,
     error,
     refetch,
-  } = useQuery(orpc.streamEventsAsync.streamedOptions({ retry: false }));
+  } = useQuery(orpc.stream.streamEventsAsync.streamedOptions({ retry: false }));
 
   return (
     <div className="bg-white border border-neutral-200 rounded-lg p-6">
@@ -861,7 +861,7 @@ function StreamAsyncLive() {
     isLoading,
     error,
     refetch,
-  } = useQuery(orpc.streamEventsAsync.liveOptions({ retry: false }));
+  } = useQuery(orpc.stream.streamEventsAsync.liveOptions({ retry: false }));
 
   return (
     <div className="bg-white border border-neutral-200 rounded-lg p-6">
