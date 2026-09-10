@@ -211,47 +211,44 @@ pub fn generate_contract() -> ContractBuilder {
     }
 
     // Topological sort: emit dependency schemas before the types that use them
+    use topological_sort::TopologicalSort;
+
+    let mut topo_sort = TopologicalSort::<&'static str>::new();
+
+    // Build the dependency graph
+    for (type_name, keys) in &type_to_keys {
+        for key in keys {
+            if let Some((reg, _)) = final_registry.get(key) {
+                // Add dependencies for this type
+                for dep in (reg.dependent_types)() {
+                    // Normalize dependency: strip to bare name for lookup
+                    let normalized = dep.rsplit("::").next().unwrap_or(dep);
+
+                    // Add edge: type_name depends on normalized
+                    // In topological-sort, add_dependency(before, after) means "before must come before after"
+                    topo_sort.add_dependency(normalized, *type_name);
+                }
+
+                // Also insert the type itself to ensure it's in the graph even if it has no deps
+                topo_sort.insert(*type_name);
+            }
+        }
+    }
+
+    // Extract sorted order
     let mut ordered: Vec<codegen::SchemaEntry> = Vec::new();
     let mut registered: Vec<(String, &'static SchemaRegistration)> = Vec::new();
-    let mut visited: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
 
-    fn visit(
-        type_name: &'static str,
-        final_registry: &std::collections::HashMap<
-            &'static str,
-            (&'static SchemaRegistration, String),
-        >,
-        type_to_keys: &std::collections::HashMap<&'static str, Vec<&'static str>>,
-        visited: &mut std::collections::HashSet<&'static str>,
-        ordered: &mut Vec<codegen::SchemaEntry>,
-        registered: &mut Vec<(String, &'static SchemaRegistration)>,
-    ) {
-        if visited.contains(type_name) {
-            return;
-        }
-        visited.insert(type_name);
-
+    // Pop all items in topological order
+    while let Some(type_name) = topo_sort.pop() {
         // Get all keys for this type (could be multiple if collision)
         let keys = type_to_keys
             .get(type_name)
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
+
         for key in keys {
             if let Some((reg, ts_schema_name)) = final_registry.get(key) {
-                // Visit dependencies first
-                for dep in (reg.dependent_types)() {
-                    // Normalize dependency: strip to bare name for lookup
-                    // Handles both full paths ("crate::types::Session") and bare names ("Session")
-                    let normalized = dep.rsplit("::").next().unwrap_or(dep);
-                    visit(
-                        normalized,
-                        final_registry,
-                        type_to_keys,
-                        visited,
-                        ordered,
-                        registered,
-                    );
-                }
                 ordered.push(codegen::SchemaEntry {
                     type_name: reg.type_name,
                     ts_schema_name: ts_schema_name.clone(),
@@ -261,18 +258,17 @@ pub fn generate_contract() -> ContractBuilder {
         }
     }
 
-    // Seed from all type names (not keys) to ensure correct dep ordering
-    let all_type_names: Vec<&'static str> = type_to_keys.keys().copied().collect();
-    for type_name in all_type_names {
-        visit(
-            type_name,
-            &final_registry,
-            &type_to_keys,
-            &mut visited,
-            &mut ordered,
-            &mut registered,
-        );
-    } // Collect error registrations
+    // Check for cycles (though the manual implementation didn't explicitly check either)
+    if !topo_sort.is_empty() {
+        eprintln!("⚠️  WARNING: Circular dependency detected in schema types");
+        eprintln!("   The following types form a dependency cycle:");
+        for remaining in topo_sort.into_items() {
+            eprintln!("     - {}", remaining);
+        }
+        eprintln!();
+    }
+
+    // Collect error registrations
     let errors: Vec<codegen::ErrorInfo> = inventory::iter::<ErrorRegistration>
         .into_iter()
         .map(|e| codegen::ErrorInfo {

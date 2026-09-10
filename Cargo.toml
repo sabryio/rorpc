@@ -33,3 +33,4 @@ proc-macro2 = "1.0"
 inventory = "0.3"
 axum = { version = "0.8", features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
+topological-sort = "0.3.1"
