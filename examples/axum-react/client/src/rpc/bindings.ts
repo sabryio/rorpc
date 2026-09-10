@@ -32,15 +32,15 @@ export type Planet = z.infer<typeof PlanetSchema>;
 
 
 // ============================================================================
-// SSE Event Types
+// Input Types - Better Auth Rorpc Example Domain Models Planet
 // ============================================================================
 
-export const EventDataSchema = z.object({
-  message: z.string(),
-  count: z.number().int()
+export const ListPlanetsPaginatedInputSchema = z.object({
+  limit: z.number().int(),
+  offset: z.number().int().optional()
 });
 
-export type EventData = z.infer<typeof EventDataSchema>;
+export type ListPlanetsPaginatedInput = z.infer<typeof ListPlanetsPaginatedInputSchema>;
 
 
 // ============================================================================
@@ -67,15 +67,28 @@ export type DeletePlanetInput = z.infer<typeof DeletePlanetInputSchema>;
 
 
 // ============================================================================
-// Domain Types - Better Auth Rorpc Example Domain Models Ping
+// SSE Event Types
 // ============================================================================
 
-export const PingResponseSchema = z.object({
-  id: z.uuid(),
-  message: z.string()
+export const EventDataSchema = z.object({
+  message: z.string(),
+  count: z.number().int()
 });
 
-export type PingResponse = z.infer<typeof PingResponseSchema>;
+export type EventData = z.infer<typeof EventDataSchema>;
+
+
+// ============================================================================
+// Enum Types
+// ============================================================================
+
+export const SseEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("campaign_created"), data: z.object({ campaign_id: z.string(), title: z.string() }) }),
+  z.object({ type: z.literal("campaign_status_changed"), data: z.object({ campaign_id: z.string(), status: z.string() }) }),
+  z.object({ type: z.literal("campaign_progress"), data: z.object({ campaign_id: z.string(), sent: z.number().int(), total: z.number().int(), failed: z.number().int() }) })
+]);
+
+export type SseEvent = z.infer<typeof SseEventSchema>;
 
 
 // ============================================================================
@@ -88,12 +101,17 @@ export const FindPlanetQuerySchema = z.object({
 
 export type FindPlanetQuery = z.infer<typeof FindPlanetQuerySchema>;
 
-export const ListPlanetsPaginatedInputSchema = z.object({
-  limit: z.number().int(),
-  offset: z.number().int().optional()
+
+// ============================================================================
+// Domain Types - Better Auth Rorpc Example Domain Models Ping
+// ============================================================================
+
+export const PingResponseSchema = z.object({
+  id: z.uuid(),
+  message: z.string()
 });
 
-export type ListPlanetsPaginatedInput = z.infer<typeof ListPlanetsPaginatedInputSchema>;
+export type PingResponse = z.infer<typeof PingResponseSchema>;
 
 // ============================================================================
 // Error Schemas
@@ -149,6 +167,10 @@ export const contract = {
       .meta(openapi({ method: "GET", path: "/stream" }))
       .input(z.void())
       .output(asyncIteratorObject(EventDataSchema)),
+    streamCampaignEvents: oc
+      .meta(openapi({ method: "GET", path: "/stream-campaigns" }))
+      .input(z.void())
+      .output(asyncIteratorObject(SseEventSchema)),
     streamEventsAsync: oc
       .meta(openapi({ method: "GET", path: "/stream-async" }))
       .input(z.void())

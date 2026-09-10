@@ -1,3 +1,4 @@
+import type { SseEvent } from "#/rpc/bindings";
 import {
   client,
   consumeAsyncIterator,
@@ -75,6 +76,14 @@ function Home() {
             <StreamAsyncStreamed />
             <StreamAsyncLive />
           </div>
+        </section>
+
+        {/* Campaign Events Section */}
+        <section className="mt-16">
+          <h2 className="text-xs font-medium uppercase tracking-wider text-neutral-500 mb-6">
+            Campaign Events Stream (Tagged Union Demo)
+          </h2>
+          <StreamCampaignEvents />
         </section>
       </div>
     </div>
@@ -930,6 +939,274 @@ function StreamAsyncLive() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function StreamCampaignEvents() {
+  const [events, setEvents] = useState<SseEvent[]>([]);
+  const [streaming, setStreaming] = useState(false);
+  const [error, setError] = useState<string>("");
+  const abortRef = useRef<AbortController | null>(null);
+
+  const handleStart = async () => {
+    setEvents([]);
+    setError("");
+    setStreaming(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const iterator = await client.stream.streamCampaignEvents(undefined, {
+        signal: controller.signal,
+      });
+      for await (const event of iterator) {
+        setEvents((prev) => [...prev, event]);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name !== "AbortError") {
+        setError(String(err));
+      }
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  };
+
+  const handleStop = () => {
+    abortRef.current?.abort();
+  };
+
+  // cleanup on unmount
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  return (
+    <div className="bg-white border border-neutral-200 rounded-lg p-6">
+      {/* Header */}
+      <div className="mb-6">
+        <div className="flex items-baseline justify-between mb-2">
+          <h3 className="text-lg font-semibold text-neutral-900">
+            Campaign Events Stream
+          </h3>
+          <code className="text-xs font-mono text-neutral-400">
+            asyncIteratorObject
+          </code>
+        </div>
+        <p className="text-sm text-neutral-500">
+          Demonstrates{" "}
+          <code className="text-xs bg-neutral-100 px-1 py-0.5 rounded">
+            SseEvent
+          </code>{" "}
+          tagged union (discriminated union) with{" "}
+          <code className="text-xs bg-neutral-100 px-1 py-0.5 rounded">
+            #[serde(tag = "type", content = "data")]
+          </code>
+        </p>
+      </div>
+
+      {/* Controls */}
+      <div className="flex items-center gap-3 mb-6">
+        <button
+          onClick={handleStart}
+          disabled={streaming}
+          className="px-4 py-2 bg-neutral-900 text-white text-sm font-medium rounded hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {streaming ? "Streaming..." : "Start Stream"}
+        </button>
+        <button
+          onClick={handleStop}
+          disabled={!streaming}
+          className="px-4 py-2 bg-white border border-neutral-300 text-neutral-700 text-sm font-medium rounded hover:border-neutral-400 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          Stop
+        </button>
+
+        {/* Connection Status */}
+        <div className="flex items-center gap-2 ml-auto">
+          <div
+            className={`w-2 h-2 rounded-full ${streaming ? "bg-green-500" : "bg-neutral-300"}`}
+          />
+          <span className="text-xs text-neutral-500">
+            {streaming ? "Streaming" : "Idle"}
+          </span>
+        </div>
+      </div>
+
+      {/* Error Display */}
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-800">
+          {error}
+        </div>
+      )}
+
+      {/* Event Log */}
+      <div className="space-y-2 max-h-125 overflow-y-auto">
+        {events.length === 0 && !error && (
+          <div className="text-center py-12 text-neutral-400 text-sm">
+            {streaming
+              ? "Waiting for events..."
+              : "Press Start Stream to begin"}
+          </div>
+        )}
+
+        {events.map((event, idx) => (
+          <CampaignEventCard key={idx} event={event} index={idx} />
+        ))}
+
+        {streaming && events.length > 0 && (
+          <div className="p-2 text-xs text-neutral-400 font-mono animate-pulse">
+            ▸ waiting for next event
+          </div>
+        )}
+      </div>
+
+      {/* Event Count */}
+      {events.length > 0 && (
+        <div className="mt-4 pt-4 border-t border-neutral-200 text-xs text-neutral-500 text-center">
+          {events.length} event{events.length !== 1 ? "s" : ""} received
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CampaignEventCard({
+  event,
+  index,
+}: {
+  event: SseEvent;
+  index: number;
+}) {
+  const getEventStyle = (type: string) => {
+    switch (type) {
+      case "campaign_created":
+        return {
+          border: "border-l-blue-500",
+          bg: "bg-blue-50",
+          icon: "🎉",
+          color: "text-blue-900",
+        };
+      case "campaign_status_changed":
+        return {
+          border: "border-l-purple-500",
+          bg: "bg-purple-50",
+          icon: "🔄",
+          color: "text-purple-900",
+        };
+      case "campaign_progress":
+        return {
+          border: "border-l-green-500",
+          bg: "bg-green-50",
+          icon: "📊",
+          color: "text-green-900",
+        };
+      default:
+        return {
+          border: "border-l-neutral-500",
+          bg: "bg-neutral-50",
+          icon: "📨",
+          color: "text-neutral-900",
+        };
+    }
+  };
+
+  const style = getEventStyle(event.type);
+
+  return (
+    <div className={`border-l-4 p-4 rounded-r-lg ${style.border} ${style.bg}`}>
+      {/* Event Header */}
+      <div className="flex items-start justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xl">{style.icon}</span>
+          <div>
+            <h4 className={`font-semibold text-sm capitalize ${style.color}`}>
+              {event.type.replace(/_/g, " ")}
+            </h4>
+            <p className="text-[10px] text-neutral-500 font-mono">
+              Event #{index}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Event Content */}
+      <div className="mt-2 bg-white rounded p-3 text-sm">
+        {event.type === "campaign_created" && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-neutral-500 font-medium w-24">
+                Campaign ID:
+              </span>
+              <span className="font-mono text-xs bg-neutral-100 px-2 py-0.5 rounded">
+                {event.data.campaign_id}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-neutral-500 font-medium w-24">Title:</span>
+              <span className="font-semibold">{event.data.title}</span>
+            </div>
+          </div>
+        )}
+
+        {event.type === "campaign_status_changed" && (
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-neutral-500 font-medium w-24">
+                Campaign ID:
+              </span>
+              <span className="font-mono text-xs bg-neutral-100 px-2 py-0.5 rounded">
+                {event.data.campaign_id}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-neutral-500 font-medium w-24">Status:</span>
+              <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-semibold uppercase">
+                {event.data.status}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {event.type === "campaign_progress" && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-neutral-500 font-medium w-24">
+                Campaign ID:
+              </span>
+              <span className="font-mono text-xs bg-neutral-100 px-2 py-0.5 rounded">
+                {event.data.campaign_id}
+              </span>
+            </div>
+            <div>
+              <div className="flex justify-between text-xs mb-1 text-neutral-600">
+                <span>
+                  Progress: {event.data.sent}/{event.data.total}
+                </span>
+                <span>Failed: {event.data.failed}</span>
+              </div>
+              <div className="w-full bg-neutral-200 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-green-600 h-2 transition-all duration-300"
+                  style={{
+                    width: `${(event.data.sent / event.data.total) * 100}%`,
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Raw JSON (collapsible) */}
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[10px] text-neutral-500 hover:text-neutral-700 select-none">
+          View raw JSON
+        </summary>
+        <pre className="mt-2 p-2 bg-neutral-900 text-green-400 text-[10px] rounded overflow-x-auto font-mono">
+          {JSON.stringify(event, null, 2)}
+        </pre>
+      </details>
     </div>
   );
 }

@@ -7,7 +7,10 @@ use axum::{
 use std::{convert::Infallible, time::Duration};
 use tokio_stream::{iter, Stream, StreamExt};
 
-use crate::{domain::models::planet::EventData, infrastructure::context::AppState};
+use crate::{
+    domain::models::{events::SseEvent, planet::EventData},
+    infrastructure::context::AppState,
+};
 
 // ---------------------------------------------------------------------------
 // SSE helpers
@@ -76,6 +79,71 @@ pub async fn stream_events_async(
                 count: i,
             });
         }
+    }))
+    .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""))
+}
+
+/// Stream campaign events - demonstrates SseEvent enum with tagged union serialization
+#[rorpc::get("/stream-campaigns", data = "SseEvent")]
+pub async fn stream_campaign_events(
+    State(_state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    Sse::new(sse_stream(stream! {
+        // Simulate campaign lifecycle events
+
+        // Event 1: Campaign created
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        yield sse_message(
+            0,
+            &SseEvent::CampaignCreated {
+                campaign_id: "campaign-001".to_string(),
+                title: "Summer Sale Campaign".to_string(),
+            },
+        );
+
+        // Event 2: Status changed
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        yield sse_message(
+            1,
+            &SseEvent::CampaignStatusChanged {
+                campaign_id: "campaign-001".to_string(),
+                status: "running".to_string(),
+            },
+        );
+
+        // Event 3-7: Progress updates
+        for i in 0..5 {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            yield sse_message(
+                2 + i,
+                &SseEvent::CampaignProgress {
+                    campaign_id: "campaign-001".to_string(),
+                    sent: (i + 1) * 20,
+                    total: 100,
+                    failed: i,
+                },
+            );
+        }
+
+        // Event 8: Another campaign created
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        yield sse_message(
+            7,
+            &SseEvent::CampaignCreated {
+                campaign_id: "campaign-002".to_string(),
+                title: "Holiday Promotion".to_string(),
+            },
+        );
+
+        // Event 9: Final status
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        yield sse_message(
+            8,
+            &SseEvent::CampaignStatusChanged {
+                campaign_id: "campaign-001".to_string(),
+                status: "completed".to_string(),
+            },
+        );
     }))
     .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(""))
 }
