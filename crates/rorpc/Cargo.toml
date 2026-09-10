@@ -19,3 +19,4 @@ rorpc-parse = { workspace = true }
 inventory = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
+indexmap = { workspace = true }

@@ -79,7 +79,7 @@ fn extract_module_name(module_path: &str) -> String {
 
     // Split by :: and collect segments
     let segments: Vec<&str> = module_path.split("::").collect();
-    
+
     if segments.len() <= 1 {
         return "_ungrouped".to_string();
     }
@@ -117,16 +117,17 @@ fn section_header(title: &str) -> String {
 /// Schemas are grouped by category (Enum, Domain, Input, Request, SSE Events) with
 /// clear section headers. Domain and Input types are further grouped by module.
 pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
-    use std::collections::BTreeMap;
+    use indexmap::IndexMap;
 
     if schemas.is_empty() {
         return String::new();
     }
 
     // Group schemas by category, then by module (for Domain/Input)
+    // Using IndexMap to preserve insertion order from the topological sort
     let mut enum_schemas = Vec::new();
-    let mut domain_by_module: BTreeMap<String, Vec<&ir::ResolvedSchema>> = BTreeMap::new();
-    let mut input_by_module: BTreeMap<String, Vec<&ir::ResolvedSchema>> = BTreeMap::new();
+    let mut domain_by_module: IndexMap<String, Vec<&ir::ResolvedSchema>> = IndexMap::new();
+    let mut input_by_module: IndexMap<String, Vec<&ir::ResolvedSchema>> = IndexMap::new();
     let mut request_schemas = Vec::new();
     let mut sse_schemas = Vec::new();
 
@@ -149,7 +150,7 @@ pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
     // Sort enum and SSE schemas alphabetically (no cross-references)
     enum_schemas.sort_by_key(|s| &s.ts_schema_name);
     sse_schemas.sort_by_key(|s| &s.ts_schema_name);
-    
+
     // For domain/input/request schemas, preserve original order within modules
     // to maintain dependency resolution order from the resolution phase.
     // Cross-references within the same module must be declared before use.
@@ -181,7 +182,9 @@ pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
                             let mut c = s.chars();
                             match c.next() {
                                 None => String::new(),
-                                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                                Some(first) => {
+                                    first.to_uppercase().collect::<String>() + c.as_str()
+                                }
                             }
                         })
                         .collect::<Vec<_>>()
@@ -214,7 +217,9 @@ pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
                             let mut c = s.chars();
                             match c.next() {
                                 None => String::new(),
-                                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                                Some(first) => {
+                                    first.to_uppercase().collect::<String>() + c.as_str()
+                                }
                             }
                         })
                         .collect::<Vec<_>>()
@@ -889,7 +894,9 @@ mod tests {
             ts_schema_name: "TestSchema".to_string(),
             ts_type_name: "Test".to_string(),
             module_path: "test::Test",
-            def: ir::ResolvedDef::Object { fields: vec![field] },
+            def: ir::ResolvedDef::Object {
+                fields: vec![field],
+            },
         };
         let output = emit_one_resolved(&schema);
         assert!(output.contains("name: z.string().nullable()"));
@@ -906,7 +913,9 @@ mod tests {
             ts_schema_name: "TestSchema".to_string(),
             ts_type_name: "Test".to_string(),
             module_path: "test::Test",
-            def: ir::ResolvedDef::Object { fields: vec![field] },
+            def: ir::ResolvedDef::Object {
+                fields: vec![field],
+            },
         };
         let output = emit_one_resolved(&schema);
         assert!(output.contains("name: z.string().optional()"));
@@ -923,7 +932,9 @@ mod tests {
             ts_schema_name: "TestSchema".to_string(),
             ts_type_name: "Test".to_string(),
             module_path: "test::Test",
-            def: ir::ResolvedDef::Object { fields: vec![field] },
+            def: ir::ResolvedDef::Object {
+                fields: vec![field],
+            },
         };
         let output = emit_one_resolved(&schema);
         assert!(output.contains("session: SessionSchema.nullable()"));
@@ -940,7 +951,9 @@ mod tests {
             ts_schema_name: "TestSchema".to_string(),
             ts_type_name: "Test".to_string(),
             module_path: "test::Test",
-            def: ir::ResolvedDef::Object { fields: vec![field] },
+            def: ir::ResolvedDef::Object {
+                fields: vec![field],
+            },
         };
         let output = emit_one_resolved(&schema);
         assert!(output.contains("session: SessionSchema.optional()"));
@@ -1024,10 +1037,7 @@ mod tests {
 
     #[test]
     fn extracts_module_name_simple() {
-        assert_eq!(
-            extract_module_name("crate::entities::Session"),
-            "entities"
-        );
+        assert_eq!(extract_module_name("crate::entities::Session"), "entities");
     }
 
     #[test]
@@ -1114,5 +1124,68 @@ mod tests {
         assert!(output.contains("StatusSchema"));
         assert!(output.contains("UserSchema"));
         assert!(output.contains("CreateUserInputSchema"));
+    }
+
+    #[test]
+    fn preserves_dependency_order_within_same_module() {
+        // Regression test for: CampaignSchema references ContactSchema before it's declared
+        // Both schemas are in the same module, and alphabetically Campaign comes before Contact,
+        // but Contact must be declared first because Campaign depends on it.
+
+        let contact_schema = ir::ResolvedSchema {
+            ts_schema_name: "ContactSchema".to_string(),
+            ts_type_name: "Contact".to_string(),
+            module_path: "app::core_types::Contact",
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.string()".to_string(),
+                }],
+            },
+        };
+
+        let campaign_schema = ir::ResolvedSchema {
+            ts_schema_name: "CampaignSchema".to_string(),
+            ts_type_name: "Campaign".to_string(),
+            module_path: "app::core_types::Campaign",
+            def: ir::ResolvedDef::Object {
+                fields: vec![
+                    ir::ResolvedField {
+                        ts_key: "id".to_string(),
+                        zod_expr: "z.string()".to_string(),
+                    },
+                    ir::ResolvedField {
+                        ts_key: "contacts".to_string(),
+                        zod_expr: "z.array(ContactSchema)".to_string(), // References ContactSchema
+                    },
+                ],
+            },
+        };
+
+        // Pass schemas in dependency order: Contact before Campaign
+        let schemas = vec![contact_schema, campaign_schema];
+        let output = emit_resolved_schemas(&schemas);
+
+        // Find positions of schema declarations
+        let contact_pos = output
+            .find("export const ContactSchema")
+            .expect("ContactSchema declaration");
+        let campaign_pos = output
+            .find("export const CampaignSchema")
+            .expect("CampaignSchema declaration");
+
+        // Contact must be declared before Campaign (dependency order preserved)
+        assert!(
+            contact_pos < campaign_pos,
+            "ContactSchema must be declared before CampaignSchema (found at {} and {} respectively)",
+            contact_pos,
+            campaign_pos
+        );
+
+        // Verify the reference is present in CampaignSchema
+        assert!(
+            output.contains("z.array(ContactSchema)"),
+            "Campaign should reference ContactSchema"
+        );
     }
 }
