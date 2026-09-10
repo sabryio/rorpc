@@ -26,19 +26,232 @@ pub fn generate_imports() -> String {
 // Data-oriented emission (replaces generate_real_schemas)
 // ---------------------------------------------------------------------------
 
-/// Emit TypeScript for a slice of fully resolved schemas.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SchemaCategory {
+    Enum,
+    Domain,
+    Input,
+    Request,
+    SseEvent,
+}
+
+/// Categorize a schema based on its characteristics.
+fn categorize_schema(schema: &ir::ResolvedSchema) -> SchemaCategory {
+    // Enums go in Enum Types section
+    if matches!(schema.def, ir::ResolvedDef::Enum { .. }) {
+        return SchemaCategory::Enum;
+    }
+
+    let type_name = &schema.ts_type_name;
+    let lower = type_name.to_lowercase();
+
+    // Check for SSE/Event patterns
+    if lower.contains("event") || lower.contains("sse") || type_name.ends_with("Data") {
+        return SchemaCategory::SseEvent;
+    }
+
+    // Check for Input/Request/Query patterns
+    if type_name.ends_with("Input")
+        || type_name.ends_with("Request")
+        || type_name.ends_with("Query")
+    {
+        // Further distinguish Request from Input
+        if type_name.ends_with("Request") {
+            return SchemaCategory::Request;
+        }
+        return SchemaCategory::Input;
+    }
+
+    // Default to Domain
+    SchemaCategory::Domain
+}
+
+/// Extract module name from module_path for grouping.
 ///
-/// One pass over structured data — no string scanning, no post-hoc replacement.
-/// Each `ResolvedField.zod_expr` is already the complete, correct expression
-/// (primitives inline, cross-references already disambiguated by the resolution
-/// pass in `lib.rs`).
-pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
-    schemas
+/// Examples:
+/// - `"crate::entities::Session"` → `"entities"`
+/// - `"crate::handlers::stream::EventData"` → `"handlers_stream"`
+/// - `""` → `"_ungrouped"`
+fn extract_module_name(module_path: &str) -> String {
+    if module_path.is_empty() {
+        return "_ungrouped".to_string();
+    }
+
+    // Split by :: and collect segments
+    let segments: Vec<&str> = module_path.split("::").collect();
+    
+    if segments.len() <= 1 {
+        return "_ungrouped".to_string();
+    }
+
+    // Skip "crate" prefix and last segment (type name)
+    let module_segments: Vec<&str> = segments
         .iter()
-        .map(emit_one_resolved)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .copied()
+        .skip_while(|&s| s == "crate")
+        .collect();
+
+    // Remove the last segment (type name)
+    let module_segments = &module_segments[..module_segments.len().saturating_sub(1)];
+
+    if module_segments.is_empty() {
+        return "_ungrouped".to_string();
+    }
+
+    // Join nested modules with underscore
+    module_segments.join("_")
+}
+
+/// Generate a section header with 76-character separator lines.
+fn section_header(title: &str) -> String {
+    format!(
+        "// ============================================================================\n\
+         // {}\n\
+         // ============================================================================",
+        title
+    )
+}
+
+/// Emit TypeScript for a slice of fully resolved schemas, organized into sections.
+///
+/// Schemas are grouped by category (Enum, Domain, Input, Request, SSE Events) with
+/// clear section headers. Domain and Input types are further grouped by module.
+pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
+    use std::collections::BTreeMap;
+
+    if schemas.is_empty() {
+        return String::new();
+    }
+
+    // Group schemas by category, then by module (for Domain/Input)
+    let mut enum_schemas = Vec::new();
+    let mut domain_by_module: BTreeMap<String, Vec<&ir::ResolvedSchema>> = BTreeMap::new();
+    let mut input_by_module: BTreeMap<String, Vec<&ir::ResolvedSchema>> = BTreeMap::new();
+    let mut request_schemas = Vec::new();
+    let mut sse_schemas = Vec::new();
+
+    for schema in schemas {
+        match categorize_schema(schema) {
+            SchemaCategory::Enum => enum_schemas.push(schema),
+            SchemaCategory::Domain => {
+                let module = extract_module_name(schema.module_path);
+                domain_by_module.entry(module).or_default().push(schema);
+            }
+            SchemaCategory::Input => {
+                let module = extract_module_name(schema.module_path);
+                input_by_module.entry(module).or_default().push(schema);
+            }
+            SchemaCategory::Request => request_schemas.push(schema),
+            SchemaCategory::SseEvent => sse_schemas.push(schema),
+        }
+    }
+
+    // Sort enum and SSE schemas alphabetically (no cross-references)
+    enum_schemas.sort_by_key(|s| &s.ts_schema_name);
+    sse_schemas.sort_by_key(|s| &s.ts_schema_name);
+    
+    // For domain/input/request schemas, preserve original order within modules
+    // to maintain dependency resolution order from the resolution phase.
+    // Cross-references within the same module must be declared before use.
+
+    let mut sections = Vec::new();
+
+    // Enum Types section
+    if !enum_schemas.is_empty() {
+        let mut lines = vec![section_header("Enum Types"), String::new()];
+        for schema in enum_schemas {
+            lines.push(emit_one_resolved(schema));
+        }
+        sections.push(lines.join("\n"));
+    }
+
+    // Domain Types section (with module subsections)
+    if !domain_by_module.is_empty() {
+        let mut lines = Vec::new();
+        for (module, schemas) in domain_by_module {
+            // Create subsection header for each module
+            let module_title = if module == "_ungrouped" {
+                "Domain Types".to_string()
+            } else {
+                format!(
+                    "Domain Types - {}",
+                    module
+                        .split('_')
+                        .map(|s| {
+                            let mut c = s.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            lines.push(section_header(&module_title));
+            lines.push(String::new());
+            for schema in schemas {
+                lines.push(emit_one_resolved(schema));
+                lines.push(String::new());
+            }
+        }
+        sections.push(lines.join("\n").trim_end().to_string());
+    }
+
+    // Input Types section (with module subsections)
+    if !input_by_module.is_empty() {
+        let mut lines = Vec::new();
+        for (module, schemas) in input_by_module {
+            // Create subsection header for each module
+            let module_title = if module == "_ungrouped" {
+                "Input Types".to_string()
+            } else {
+                format!(
+                    "Input Types - {}",
+                    module
+                        .split('_')
+                        .map(|s| {
+                            let mut c = s.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            lines.push(section_header(&module_title));
+            lines.push(String::new());
+            for schema in schemas {
+                lines.push(emit_one_resolved(schema));
+                lines.push(String::new());
+            }
+        }
+        sections.push(lines.join("\n").trim_end().to_string());
+    }
+
+    // Request Types section (conditional)
+    if !request_schemas.is_empty() {
+        let mut lines = vec![section_header("Request Types"), String::new()];
+        for schema in request_schemas {
+            lines.push(emit_one_resolved(schema));
+            lines.push(String::new());
+        }
+        sections.push(lines.join("\n").trim_end().to_string());
+    }
+
+    // SSE Event Types section (conditional)
+    if !sse_schemas.is_empty() {
+        let mut lines = vec![section_header("SSE Event Types"), String::new()];
+        for schema in sse_schemas {
+            lines.push(emit_one_resolved(schema));
+            lines.push(String::new());
+        }
+        sections.push(lines.join("\n").trim_end().to_string());
+    }
+
+    sections.join("\n\n")
 }
 
 fn emit_one_resolved(s: &ir::ResolvedSchema) -> String {
@@ -731,5 +944,175 @@ mod tests {
         };
         let output = emit_one_resolved(&schema);
         assert!(output.contains("session: SessionSchema.optional()"));
+    }
+
+    // --- Schema organization tests ---
+
+    #[test]
+    fn categorizes_enum_correctly() {
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "StatusSchema".to_string(),
+            ts_type_name: "Status".to_string(),
+            module_path: "app::Status",
+            def: ir::ResolvedDef::Enum {
+                repr: ir::ResolvedEnumRepr::External,
+                variants: vec![],
+            },
+        };
+        assert_eq!(categorize_schema(&schema), SchemaCategory::Enum);
+    }
+
+    #[test]
+    fn categorizes_input_types_correctly() {
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "CreateUserInputSchema".to_string(),
+            ts_type_name: "CreateUserInput".to_string(),
+            module_path: "app::CreateUserInput",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&schema), SchemaCategory::Input);
+
+        let query_schema = ir::ResolvedSchema {
+            ts_schema_name: "SearchQuerySchema".to_string(),
+            ts_type_name: "SearchQuery".to_string(),
+            module_path: "app::SearchQuery",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&query_schema), SchemaCategory::Input);
+    }
+
+    #[test]
+    fn categorizes_request_types_correctly() {
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "UpdateUserRequestSchema".to_string(),
+            ts_type_name: "UpdateUserRequest".to_string(),
+            module_path: "app::UpdateUserRequest",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&schema), SchemaCategory::Request);
+    }
+
+    #[test]
+    fn categorizes_sse_event_types_correctly() {
+        let event_schema = ir::ResolvedSchema {
+            ts_schema_name: "UserEventSchema".to_string(),
+            ts_type_name: "UserEvent".to_string(),
+            module_path: "app::UserEvent",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&event_schema), SchemaCategory::SseEvent);
+
+        let data_schema = ir::ResolvedSchema {
+            ts_schema_name: "StreamDataSchema".to_string(),
+            ts_type_name: "StreamData".to_string(),
+            module_path: "app::StreamData",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&data_schema), SchemaCategory::SseEvent);
+    }
+
+    #[test]
+    fn categorizes_domain_types_by_default() {
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "UserSchema".to_string(),
+            ts_type_name: "User".to_string(),
+            module_path: "app::User",
+            def: ir::ResolvedDef::Object { fields: vec![] },
+        };
+        assert_eq!(categorize_schema(&schema), SchemaCategory::Domain);
+    }
+
+    #[test]
+    fn extracts_module_name_simple() {
+        assert_eq!(
+            extract_module_name("crate::entities::Session"),
+            "entities"
+        );
+    }
+
+    #[test]
+    fn extracts_module_name_nested() {
+        assert_eq!(
+            extract_module_name("crate::handlers::stream::EventData"),
+            "handlers_stream"
+        );
+    }
+
+    #[test]
+    fn extracts_module_name_ungrouped_when_empty() {
+        assert_eq!(extract_module_name(""), "_ungrouped");
+    }
+
+    #[test]
+    fn extracts_module_name_ungrouped_when_no_path() {
+        assert_eq!(extract_module_name("Session"), "_ungrouped");
+    }
+
+    #[test]
+    fn section_header_format() {
+        let header = section_header("Enum Types");
+        assert!(header.contains("// ===="));
+        assert!(header.contains("// Enum Types"));
+        assert_eq!(header.lines().count(), 3);
+    }
+
+    #[test]
+    fn emit_resolved_schemas_organizes_by_category() {
+        let enum_schema = ir::ResolvedSchema {
+            ts_schema_name: "StatusSchema".to_string(),
+            ts_type_name: "Status".to_string(),
+            module_path: "app::Status",
+            def: ir::ResolvedDef::Enum {
+                repr: ir::ResolvedEnumRepr::External,
+                variants: vec![ir::ResolvedVariant {
+                    serialized_name: "active".to_string(),
+                    kind: ir::ResolvedVariantKind::Unit,
+                }],
+            },
+        };
+
+        let domain_schema = ir::ResolvedSchema {
+            ts_schema_name: "UserSchema".to_string(),
+            ts_type_name: "User".to_string(),
+            module_path: "crate::entities::User",
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "id".to_string(),
+                    zod_expr: "z.string()".to_string(),
+                }],
+            },
+        };
+
+        let input_schema = ir::ResolvedSchema {
+            ts_schema_name: "CreateUserInputSchema".to_string(),
+            ts_type_name: "CreateUserInput".to_string(),
+            module_path: "crate::handlers::CreateUserInput",
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "name".to_string(),
+                    zod_expr: "z.string()".to_string(),
+                }],
+            },
+        };
+
+        let schemas = vec![enum_schema, domain_schema, input_schema];
+        let output = emit_resolved_schemas(&schemas);
+
+        // Check section headers appear in correct order
+        let enum_pos = output.find("// Enum Types").expect("Enum Types section");
+        let domain_pos = output
+            .find("// Domain Types - Entities")
+            .expect("Domain Types section");
+        let input_pos = output
+            .find("// Input Types - Handlers")
+            .expect("Input Types section");
+
+        assert!(enum_pos < domain_pos);
+        assert!(domain_pos < input_pos);
+
+        // Check schemas appear in their sections
+        assert!(output.contains("StatusSchema"));
+        assert!(output.contains("UserSchema"));
+        assert!(output.contains("CreateUserInputSchema"));
     }
 }

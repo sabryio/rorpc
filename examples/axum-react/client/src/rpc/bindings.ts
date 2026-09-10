@@ -6,6 +6,10 @@ import { oc } from "@orpc/contract";
 import { openapi } from "@orpc/openapi";
 import { asyncIteratorObject } from "@orpc/contract";
 
+// ============================================================================
+// Domain Types - Better Auth Rorpc Example Domain Models Ping
+// ============================================================================
+
 export const PingResponseSchema = z.object({
   id: z.uuid(),
   message: z.string()
@@ -13,11 +17,9 @@ export const PingResponseSchema = z.object({
 
 export type PingResponse = z.infer<typeof PingResponseSchema>;
 
-export const FindPlanetQuerySchema = z.object({
-  q: z.string().optional()
-});
-
-export type FindPlanetQuery = z.infer<typeof FindPlanetQuerySchema>;
+// ============================================================================
+// Domain Types - Better Auth Rorpc Example Domain Models Planet
+// ============================================================================
 
 export const PlanetSchema = z.object({
   id: z.number().int(),
@@ -27,18 +29,16 @@ export const PlanetSchema = z.object({
 
 export type Planet = z.infer<typeof PlanetSchema>;
 
-export const DeletePlanetInputSchema = z.object({
-  id: z.number().int()
-});
-
-export type DeletePlanetInput = z.infer<typeof DeletePlanetInputSchema>;
-
 export const ListPlanetsPaginatedOutputSchema = z.object({
   items: z.array(PlanetSchema),
   next_page_param: z.number().int().optional()
 });
 
 export type ListPlanetsPaginatedOutput = z.infer<typeof ListPlanetsPaginatedOutputSchema>;
+
+// ============================================================================
+// Input Types - Better Auth Rorpc Example Domain Models Planet
+// ============================================================================
 
 export const CreatePlanetInputSchema = z.object({
   name: z.string(),
@@ -47,12 +47,28 @@ export const CreatePlanetInputSchema = z.object({
 
 export type CreatePlanetInput = z.infer<typeof CreatePlanetInputSchema>;
 
+export const DeletePlanetInputSchema = z.object({
+  id: z.number().int()
+});
+
+export type DeletePlanetInput = z.infer<typeof DeletePlanetInputSchema>;
+
+export const FindPlanetQuerySchema = z.object({
+  q: z.string().optional()
+});
+
+export type FindPlanetQuery = z.infer<typeof FindPlanetQuerySchema>;
+
 export const ListPlanetsPaginatedInputSchema = z.object({
   limit: z.number().int(),
   offset: z.number().int().optional()
 });
 
 export type ListPlanetsPaginatedInput = z.infer<typeof ListPlanetsPaginatedInputSchema>;
+
+// ============================================================================
+// SSE Event Types
+// ============================================================================
 
 export const EventDataSchema = z.object({
   message: z.string(),
