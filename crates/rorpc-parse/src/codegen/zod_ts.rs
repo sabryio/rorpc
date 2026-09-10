@@ -64,6 +64,12 @@ fn expand_named_struct(
         let zod = parse_zod_attrs(&field.attrs)?;
         let is_opt = is_option_type(&field.ty);
 
+        // Check if this Option field has skip_serializing_if = "Option::is_none"
+        let skip_if_none = is_opt && matches!(
+            serde.skip_serializing_if.as_deref(),
+            Some("Option::is_none") | Some("std::option::Option::is_none")
+        );
+
         let base_ty = if is_opt {
             option_inner(&field.ty).unwrap_or(&field.ty)
         } else {
@@ -84,7 +90,11 @@ fn expand_named_struct(
                 // Vec<CustomType> or HashMap<K, V> with custom types
                 // Emit complete Zod expression with wrapper, not bare type_ref
                 let zod_expr = if is_opt {
-                    format!("{}.optional()", container_expr)
+                    if skip_if_none {
+                        format!("{}.optional()", container_expr)
+                    } else {
+                        format!("{}.nullable()", container_expr)
+                    }
                 } else {
                     container_expr
                 };
@@ -94,6 +104,7 @@ fn expand_named_struct(
                         zod_expr:  #zod_expr,
                         type_ref:  "",
                         optional:  #is_opt,
+                        skip_if_none: #skip_if_none,
                     }
                 }
             } else if let Some(ref type_ref) = custom {
@@ -105,13 +116,18 @@ fn expand_named_struct(
                         zod_expr:  "",
                         type_ref:  #bare_ref,
                         optional:  #is_opt,
+                        skip_if_none: #skip_if_none,
                     }
                 }
             } else {
                 // Primitive — compute the full Zod expression now.
                 let zod_expr = rust_type_to_zod(base_ty, &zod);
                 let zod_expr = if is_opt {
-                    format!("{}.optional()", zod_expr)
+                    if skip_if_none {
+                        format!("{}.optional()", zod_expr)
+                    } else {
+                        format!("{}.nullable()", zod_expr)
+                    }
                 } else {
                     zod_expr
                 };
@@ -121,6 +137,7 @@ fn expand_named_struct(
                         zod_expr:  #zod_expr,
                         type_ref:  "",
                         optional:  #is_opt,
+                        skip_if_none: #skip_if_none,
                     }
                 }
             };
@@ -232,6 +249,13 @@ fn generate_variant_def(fields: &Fields) -> Result<TokenStream> {
                 let ts_key = serde.rename.as_deref().unwrap_or(&field_name);
                 let zod_attrs = parse_zod_attrs(&field.attrs)?;
                 let is_opt = is_option_type(&field.ty);
+                
+                // Check if this Option field has skip_serializing_if = "Option::is_none"
+                let skip_if_none = is_opt && matches!(
+                    serde.skip_serializing_if.as_deref(),
+                    Some("Option::is_none") | Some("std::option::Option::is_none")
+                );
+                
                 let base_ty = if is_opt {
                     option_inner(&field.ty).unwrap_or(&field.ty)
                 } else {
@@ -246,12 +270,17 @@ fn generate_variant_def(fields: &Fields) -> Result<TokenStream> {
                             zod_expr: "",
                             type_ref: #bare_ref,
                             optional: #is_opt,
+                            skip_if_none: #skip_if_none,
                         }
                     }
                 } else {
                     let zod_expr = rust_type_to_zod(base_ty, &zod_attrs);
                     let zod_expr = if is_opt {
-                        format!("{}.optional()", zod_expr)
+                        if skip_if_none {
+                            format!("{}.optional()", zod_expr)
+                        } else {
+                            format!("{}.nullable()", zod_expr)
+                        }
                     } else {
                         zod_expr
                     };
@@ -261,6 +290,7 @@ fn generate_variant_def(fields: &Fields) -> Result<TokenStream> {
                             zod_expr: #zod_expr,
                             type_ref: "",
                             optional: #is_opt,
+                            skip_if_none: #skip_if_none,
                         }
                     }
                 };

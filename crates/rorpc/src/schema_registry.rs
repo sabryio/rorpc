@@ -32,7 +32,12 @@ pub struct FieldDef {
     pub zod_expr: &'static str,
     /// Bare Rust type name of a custom dependency, or `""` when `zod_expr` is set.
     pub type_ref: &'static str,
+    /// True if the Rust type is `Option<T>`.
     pub optional: bool,
+    /// True if field has `#[serde(skip_serializing_if = "Option::is_none")]`.
+    /// Only meaningful when `optional` is true. Controls whether to emit
+    /// `.optional()` (field can be omitted) vs `.nullable()` (field present but can be null).
+    pub skip_if_none: bool,
 }
 
 /// Serde enum representation strategy.

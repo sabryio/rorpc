@@ -354,11 +354,15 @@ pub fn generate_contract() -> ContractBuilder {
             // Primitive — already a complete expression
             field.zod_expr.to_string()
         } else {
-            // Custom type — resolve to ts_schema_name, apply optional wrapper
+            // Custom type — resolve to ts_schema_name, apply optional/nullable wrapper
             let base = resolve_type_ref(field.type_ref, referencing_module, candidates_by_name)
                 .unwrap_or_else(|| format!("{}Schema", field.type_ref));
             if field.optional {
-                format!("{}.optional()", base)
+                if field.skip_if_none {
+                    format!("{}.optional()", base)
+                } else {
+                    format!("{}.nullable()", base)
+                }
             } else {
                 base
             }

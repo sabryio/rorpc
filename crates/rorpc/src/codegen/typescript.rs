@@ -662,4 +662,74 @@ mod tests {
             r#"z.object({ type: z.literal("user"), data: z.object({ id: z.number() }) })"#
         );
     }
+
+    // --- Option serialization tests (nullable vs optional) ---
+
+    #[test]
+    fn option_string_without_skip_generates_nullable() {
+        // Option<String> without skip_serializing_if → .nullable()
+        let field = ir::ResolvedField {
+            ts_key: "name".to_string(),
+            zod_expr: "z.string().nullable()".to_string(),
+        };
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "TestSchema".to_string(),
+            ts_type_name: "Test".to_string(),
+            module_path: "test::Test",
+            def: ir::ResolvedDef::Object { fields: vec![field] },
+        };
+        let output = emit_one_resolved(&schema);
+        assert!(output.contains("name: z.string().nullable()"));
+    }
+
+    #[test]
+    fn option_string_with_skip_generates_optional() {
+        // Option<String> with skip_serializing_if → .optional()
+        let field = ir::ResolvedField {
+            ts_key: "name".to_string(),
+            zod_expr: "z.string().optional()".to_string(),
+        };
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "TestSchema".to_string(),
+            ts_type_name: "Test".to_string(),
+            module_path: "test::Test",
+            def: ir::ResolvedDef::Object { fields: vec![field] },
+        };
+        let output = emit_one_resolved(&schema);
+        assert!(output.contains("name: z.string().optional()"));
+    }
+
+    #[test]
+    fn option_custom_type_without_skip_generates_nullable() {
+        // Option<CustomType> without skip_serializing_if → CustomTypeSchema.nullable()
+        let field = ir::ResolvedField {
+            ts_key: "session".to_string(),
+            zod_expr: "SessionSchema.nullable()".to_string(),
+        };
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "TestSchema".to_string(),
+            ts_type_name: "Test".to_string(),
+            module_path: "test::Test",
+            def: ir::ResolvedDef::Object { fields: vec![field] },
+        };
+        let output = emit_one_resolved(&schema);
+        assert!(output.contains("session: SessionSchema.nullable()"));
+    }
+
+    #[test]
+    fn option_custom_type_with_skip_generates_optional() {
+        // Option<CustomType> with skip_serializing_if → CustomTypeSchema.optional()
+        let field = ir::ResolvedField {
+            ts_key: "session".to_string(),
+            zod_expr: "SessionSchema.optional()".to_string(),
+        };
+        let schema = ir::ResolvedSchema {
+            ts_schema_name: "TestSchema".to_string(),
+            ts_type_name: "Test".to_string(),
+            module_path: "test::Test",
+            def: ir::ResolvedDef::Object { fields: vec![field] },
+        };
+        let output = emit_one_resolved(&schema);
+        assert!(output.contains("session: SessionSchema.optional()"));
+    }
 }

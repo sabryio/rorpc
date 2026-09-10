@@ -29,6 +29,8 @@ pub struct SerdeAttrs {
     pub content: Option<String>,
     /// `#[serde(untagged)]` on enum containers
     pub untagged: bool,
+    /// `#[serde(skip_serializing_if = "...")]` — stores the predicate string
+    pub skip_serializing_if: Option<String>,
 }
 
 /// Parse all `#[serde(...)]` attributes from a slice, merging results.
@@ -61,6 +63,8 @@ pub fn parse_serde_attrs(attrs: &[Attribute]) -> Result<SerdeAttrs> {
                 out.content = Some(parse_lit_str_value(&meta)?);
             } else if meta.path.is_ident("untagged") {
                 out.untagged = true;
+            } else if meta.path.is_ident("skip_serializing_if") {
+                out.skip_serializing_if = Some(parse_lit_str_value(&meta)?);
             } else {
                 // Unknown serde key — consume any value so the parser doesn't stall
                 skip_meta_value(&meta)?;
@@ -462,6 +466,30 @@ mod tests {
         assert!(attrs.untagged);
         assert_eq!(attrs.tag, None);
         assert_eq!(attrs.content, None);
+    }
+
+    #[test]
+    fn serde_skip_serializing_if_option_is_none() {
+        let s: syn::ItemStruct = parse_quote! {
+            struct S {
+                #[serde(skip_serializing_if = "Option::is_none")]
+                field: Option<String>,
+            }
+        };
+        let attrs = parse_serde_attrs(&field_attrs(&s, "field")).unwrap();
+        assert_eq!(attrs.skip_serializing_if, Some("Option::is_none".to_string()));
+    }
+
+    #[test]
+    fn serde_skip_serializing_if_custom_predicate() {
+        let s: syn::ItemStruct = parse_quote! {
+            struct S {
+                #[serde(skip_serializing_if = "String::is_empty")]
+                field: String,
+            }
+        };
+        let attrs = parse_serde_attrs(&field_attrs(&s, "field")).unwrap();
+        assert_eq!(attrs.skip_serializing_if, Some("String::is_empty".to_string()));
     }
 
     #[test]
