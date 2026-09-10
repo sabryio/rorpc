@@ -117,146 +117,102 @@ fn section_header(title: &str) -> String {
 /// Schemas are grouped by category (Enum, Domain, Input, Request, SSE Events) with
 /// clear section headers. Domain and Input types are further grouped by module.
 pub fn emit_resolved_schemas(schemas: &[ir::ResolvedSchema]) -> String {
-    use indexmap::IndexMap;
-
     if schemas.is_empty() {
         return String::new();
     }
 
-    // Group schemas by category, then by module (for Domain/Input)
-    // Using IndexMap to preserve insertion order from the topological sort
-    let mut enum_schemas = Vec::new();
-    let mut domain_by_module: IndexMap<String, Vec<&ir::ResolvedSchema>> = IndexMap::new();
-    let mut input_by_module: IndexMap<String, Vec<&ir::ResolvedSchema>> = IndexMap::new();
-    let mut request_schemas = Vec::new();
-    let mut sse_schemas = Vec::new();
+    // Emit schemas in topological dependency order (as provided), inserting
+    // section headers when category/module changes but never reordering.
+    let mut lines = Vec::new();
+    let mut last_category: Option<SchemaCategory> = None;
+    let mut last_module: Option<String> = None;
 
     for schema in schemas {
-        match categorize_schema(schema) {
-            SchemaCategory::Enum => enum_schemas.push(schema),
-            SchemaCategory::Domain => {
-                let module = extract_module_name(schema.module_path);
-                domain_by_module.entry(module).or_default().push(schema);
+        let category = categorize_schema(schema);
+        let module = extract_module_name(schema.module_path);
+
+        // Determine if we need a new section header
+        let needs_header = match last_category {
+            None => true,                                        // First schema
+            Some(ref last_cat) if *last_cat != category => true, // Category changed
+            Some(SchemaCategory::Domain) | Some(SchemaCategory::Input) => {
+                // For Domain/Input, also check module change
+                last_module.as_ref() != Some(&module)
             }
-            SchemaCategory::Input => {
-                let module = extract_module_name(schema.module_path);
-                input_by_module.entry(module).or_default().push(schema);
-            }
-            SchemaCategory::Request => request_schemas.push(schema),
-            SchemaCategory::SseEvent => sse_schemas.push(schema),
-        }
-    }
+            _ => false,
+        };
 
-    // Sort enum and SSE schemas alphabetically (no cross-references)
-    enum_schemas.sort_by_key(|s| &s.ts_schema_name);
-    sse_schemas.sort_by_key(|s| &s.ts_schema_name);
-
-    // For domain/input/request schemas, preserve original order within modules
-    // to maintain dependency resolution order from the resolution phase.
-    // Cross-references within the same module must be declared before use.
-
-    let mut sections = Vec::new();
-
-    // Enum Types section
-    if !enum_schemas.is_empty() {
-        let mut lines = vec![section_header("Enum Types"), String::new()];
-        for schema in enum_schemas {
-            lines.push(emit_one_resolved(schema));
-        }
-        sections.push(lines.join("\n"));
-    }
-
-    // Domain Types section (with module subsections)
-    if !domain_by_module.is_empty() {
-        let mut lines = Vec::new();
-        for (module, schemas) in domain_by_module {
-            // Create subsection header for each module
-            let module_title = if module == "_ungrouped" {
-                "Domain Types".to_string()
-            } else {
-                format!(
-                    "Domain Types - {}",
-                    module
-                        .split('_')
-                        .map(|s| {
-                            let mut c = s.chars();
-                            match c.next() {
-                                None => String::new(),
-                                Some(first) => {
-                                    first.to_uppercase().collect::<String>() + c.as_str()
-                                }
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            };
-            lines.push(section_header(&module_title));
-            lines.push(String::new());
-            for schema in schemas {
-                lines.push(emit_one_resolved(schema));
+        if needs_header {
+            // Add blank line before new section (except first)
+            if last_category.is_some() {
                 lines.push(String::new());
             }
-        }
-        sections.push(lines.join("\n").trim_end().to_string());
-    }
 
-    // Input Types section (with module subsections)
-    if !input_by_module.is_empty() {
-        let mut lines = Vec::new();
-        for (module, schemas) in input_by_module {
-            // Create subsection header for each module
-            let module_title = if module == "_ungrouped" {
-                "Input Types".to_string()
-            } else {
-                format!(
-                    "Input Types - {}",
-                    module
-                        .split('_')
-                        .map(|s| {
-                            let mut c = s.chars();
-                            match c.next() {
-                                None => String::new(),
-                                Some(first) => {
-                                    first.to_uppercase().collect::<String>() + c.as_str()
-                                }
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
+            // Generate section header
+            let header_title = match category {
+                SchemaCategory::Enum => "Enum Types".to_string(),
+                SchemaCategory::Domain => {
+                    if module == "_ungrouped" {
+                        "Domain Types".to_string()
+                    } else {
+                        format!(
+                            "Domain Types - {}",
+                            module
+                                .split('_')
+                                .map(|s| {
+                                    let mut c = s.chars();
+                                    match c.next() {
+                                        None => String::new(),
+                                        Some(first) => {
+                                            first.to_uppercase().collect::<String>() + c.as_str()
+                                        }
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    }
+                }
+                SchemaCategory::Input => {
+                    if module == "_ungrouped" {
+                        "Input Types".to_string()
+                    } else {
+                        format!(
+                            "Input Types - {}",
+                            module
+                                .split('_')
+                                .map(|s| {
+                                    let mut c = s.chars();
+                                    match c.next() {
+                                        None => String::new(),
+                                        Some(first) => {
+                                            first.to_uppercase().collect::<String>() + c.as_str()
+                                        }
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    }
+                }
+                SchemaCategory::Request => "Request Types".to_string(),
+                SchemaCategory::SseEvent => "SSE Event Types".to_string(),
             };
-            lines.push(section_header(&module_title));
-            lines.push(String::new());
-            for schema in schemas {
-                lines.push(emit_one_resolved(schema));
-                lines.push(String::new());
-            }
-        }
-        sections.push(lines.join("\n").trim_end().to_string());
-    }
 
-    // Request Types section (conditional)
-    if !request_schemas.is_empty() {
-        let mut lines = vec![section_header("Request Types"), String::new()];
-        for schema in request_schemas {
-            lines.push(emit_one_resolved(schema));
+            lines.push(section_header(&header_title));
             lines.push(String::new());
         }
-        sections.push(lines.join("\n").trim_end().to_string());
+
+        // Emit the schema
+        lines.push(emit_one_resolved(schema));
+        lines.push(String::new());
+
+        // Update tracking state
+        last_category = Some(category);
+        last_module = Some(module);
     }
 
-    // SSE Event Types section (conditional)
-    if !sse_schemas.is_empty() {
-        let mut lines = vec![section_header("SSE Event Types"), String::new()];
-        for schema in sse_schemas {
-            lines.push(emit_one_resolved(schema));
-            lines.push(String::new());
-        }
-        sections.push(lines.join("\n").trim_end().to_string());
-    }
-
-    sections.join("\n\n")
+    lines.join("\n").trim_end().to_string()
 }
 
 fn emit_one_resolved(s: &ir::ResolvedSchema) -> String {
@@ -1186,6 +1142,62 @@ mod tests {
         assert!(
             output.contains("z.array(ContactSchema)"),
             "Campaign should reference ContactSchema"
+        );
+    }
+    
+    #[test]
+    fn preserves_cross_category_dependency_order() {
+        // Regression test for: TickResponseSchema (Domain) references ProcessedItemSchema (SSE Event)
+        // ProcessedItemSchema must be declared first even though it's in a different category.
+    
+        let processed_item_schema = ir::ResolvedSchema {
+            ts_schema_name: "ProcessedItemSchema".to_string(),
+            ts_type_name: "ProcessedItem".to_string(),
+            module_path: "app::events::ProcessedItem",
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "item_id".to_string(),
+                    zod_expr: "z.string()".to_string(),
+                }],
+            },
+        };
+    
+        let tick_response_schema = ir::ResolvedSchema {
+            ts_schema_name: "TickResponseSchema".to_string(),
+            ts_type_name: "TickResponse".to_string(),
+            module_path: "app::handlers::scheduler::TickResponse",
+            def: ir::ResolvedDef::Object {
+                fields: vec![ir::ResolvedField {
+                    ts_key: "processed".to_string(),
+                    zod_expr: "z.array(ProcessedItemSchema)".to_string(), // References ProcessedItemSchema
+                }],
+            },
+        };
+    
+        // Pass schemas in dependency order: ProcessedItem before TickResponse
+        let schemas = vec![processed_item_schema, tick_response_schema];
+        let output = emit_resolved_schemas(&schemas);
+    
+        // Find positions of schema declarations
+        let processed_pos = output
+            .find("export const ProcessedItemSchema")
+            .expect("ProcessedItemSchema declaration");
+        let tick_pos = output
+            .find("export const TickResponseSchema")
+            .expect("TickResponseSchema declaration");
+    
+        // ProcessedItem must be declared before TickResponse (cross-category dependency preserved)
+        assert!(
+            processed_pos < tick_pos,
+            "ProcessedItemSchema must be declared before TickResponseSchema (found at {} and {} respectively)",
+            processed_pos,
+            tick_pos
+        );
+    
+        // Verify the reference is present in TickResponseSchema
+        assert!(
+            output.contains("z.array(ProcessedItemSchema)"),
+            "TickResponse should reference ProcessedItemSchema"
         );
     }
 }
