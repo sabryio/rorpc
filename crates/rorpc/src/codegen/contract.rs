@@ -4,7 +4,84 @@
 //! from collected handler metadata, grouped by path prefix (namespace).
 
 use super::HandlerInfo;
-use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+
+/// Compute a content-based hash for an error variant set.
+///
+/// Hash is based on the sorted list of (variant_name, data_schema) tuples,
+/// making it order-independent for comparison.
+fn error_variant_set_hash(variants: &[super::ErrorVariantInfo]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+
+    // Sort variants by name for consistent hashing
+    let mut sorted: Vec<_> = variants.iter().collect();
+    sorted.sort_by_key(|v| v.name);
+
+    for variant in sorted {
+        variant.name.hash(&mut hasher);
+        variant.data_schema.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
+/// Generate a TypeScript constant name for an error set.
+///
+/// Returns `"StandardApiErrors"` if this is the only error set in the project,
+/// otherwise returns `"{TypeName}Errors"` based on the most common (or first
+/// alphabetically) Rust error type that uses this variant set.
+fn generate_error_constant_name(type_names: &[&str], is_only_set: bool) -> String {
+    if is_only_set {
+        "StandardApiErrors".to_string()
+    } else if let Some(&type_name) = type_names.first() {
+        // Remove "Error" suffix if present to avoid "AppErrorErrors"
+        let base = type_name.strip_suffix("Error").unwrap_or(type_name);
+        format!("{}Errors", base)
+    } else {
+        "StandardApiErrors".to_string()
+    }
+}
+
+/// Emit TypeScript constant definitions for error variant sets.
+///
+/// Returns a vector of lines forming the error constants section, including
+/// header comment and `as const` assertions.
+fn emit_error_constants(error_sets: &[(String, &super::ErrorInfo)]) -> Vec<String> {
+    if error_sets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec![
+        "// ============================================================================"
+            .to_string(),
+        "// Error Schemas".to_string(),
+        "// ============================================================================"
+            .to_string(),
+        String::new(),
+    ];
+
+    for (const_name, error_info) in error_sets {
+        let entries: Vec<String> = error_info
+            .variants
+            .iter()
+            .map(|v| match v.data_schema {
+                Some(schema) => format!("  {}: {{\n    data: {}\n  }}", v.name, schema),
+                None => format!("  {}: {{}}", v.name),
+            })
+            .collect();
+
+        if !entries.is_empty() {
+            lines.push(format!("const {} = {{", const_name));
+            lines.extend(entries.iter().map(|e| format!("{},", e)));
+            lines.push("} as const;".to_string());
+            lines.push(String::new());
+        }
+    }
+
+    lines
+}
 
 /// Generate the `export const contract = { ... } as const` TypeScript block.
 ///
@@ -21,6 +98,50 @@ pub fn generate_contract(
     let error_map: std::collections::HashMap<&str, &super::ErrorInfo> =
         errors.iter().map(|e| (e.type_name, e)).collect();
 
+    // Pass 1: Collect unique error variant sets
+    let mut error_set_map: HashMap<u64, (Vec<&str>, &super::ErrorInfo)> = HashMap::new();
+
+    for handler in handlers {
+        if let Some(error_type_name) = handler.error_type_name
+            && let Some(&error_info) = error_map.get(error_type_name)
+        {
+            let hash = error_variant_set_hash(&error_info.variants);
+            error_set_map
+                .entry(hash)
+                .or_insert_with(|| (Vec::new(), error_info))
+                .0
+                .push(error_type_name);
+        }
+    }
+
+    // Pass 2: Assign constant names to each unique error set
+    let is_only_set = error_set_map.len() == 1;
+    let mut error_constants: Vec<(String, &super::ErrorInfo)> = error_set_map
+        .values()
+        .map(|(type_names, error_info)| {
+            let const_name = generate_error_constant_name(type_names, is_only_set);
+            (const_name, *error_info)
+        })
+        .collect();
+
+    // Sort by constant name for deterministic output
+    error_constants.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Build error type name → constant name lookup map
+    let error_constant_map: HashMap<&str, String> = error_set_map
+        .iter()
+        .flat_map(|(hash, (type_names, _))| {
+            // Find the constant name for this hash
+            let const_name = error_constants
+                .iter()
+                .find(|(_, info)| error_variant_set_hash(&info.variants) == *hash)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_else(|| "StandardApiErrors".to_string());
+
+            type_names.iter().map(move |&tn| (tn, const_name.clone()))
+        })
+        .collect();
+
     let mut namespaces: BTreeMap<String, Vec<&HandlerInfo>> = BTreeMap::new();
 
     for handler in handlers {
@@ -28,14 +149,37 @@ pub fn generate_contract(
         namespaces.entry(namespace).or_default().push(handler);
     }
 
-    let mut lines = vec!["export const contract = {".to_string()];
+    // Emit error constants section
+    let mut lines = emit_error_constants(&error_constants);
+
+    // Add separator if error constants were emitted
+    if !lines.is_empty() {
+        lines.push(
+            "// ============================================================================"
+                .to_string(),
+        );
+        lines.push("// API Contract".to_string());
+        lines.push(
+            "// ============================================================================"
+                .to_string(),
+        );
+        lines.push(String::new());
+    }
+
+    lines.push("export const contract = {".to_string());
 
     for (namespace, handlers) in &namespaces {
         if namespace.is_empty() {
             for h in handlers {
                 lines.push(format!(
                     "  {},",
-                    generate_procedure_entry(h, &error_map, schemas, schema_name_map)
+                    generate_procedure_entry(
+                        h,
+                        &error_map,
+                        &error_constant_map,
+                        schemas,
+                        schema_name_map
+                    )
                 ));
             }
         } else {
@@ -43,7 +187,13 @@ pub fn generate_contract(
             for h in handlers {
                 lines.push(format!(
                     "    {},",
-                    generate_procedure_entry(h, &error_map, schemas, schema_name_map)
+                    generate_procedure_entry(
+                        h,
+                        &error_map,
+                        &error_constant_map,
+                        schemas,
+                        schema_name_map
+                    )
                 ));
             }
             lines.push("  },".to_string());
@@ -136,6 +286,7 @@ fn find_first_generic_comma(s: &str) -> Option<usize> {
 fn generate_procedure_entry(
     handler: &HandlerInfo,
     error_map: &std::collections::HashMap<&str, &super::ErrorInfo>,
+    error_constant_map: &HashMap<&str, String>,
     schemas: &[super::SchemaEntry],
     schema_name_map: &std::collections::HashMap<String, String>,
 ) -> String {
@@ -186,7 +337,12 @@ fn generate_procedure_entry(
     };
 
     let errors_block = if let Some(error_type_name) = handler.error_type_name {
-        if let Some(error_info) = error_map.get(error_type_name) {
+        // Check if this error type has a constant defined
+        if let Some(const_name) = error_constant_map.get(error_type_name) {
+            // Reference the shared constant
+            format!("\n      .errors({})", const_name)
+        } else if let Some(error_info) = error_map.get(error_type_name) {
+            // Fall back to inline generation (shouldn't happen if deduplication worked)
             let entries: Vec<String> = error_info
                 .variants
                 .iter()
@@ -330,10 +486,36 @@ fn merge_path_and_query_schema(
     }
 }
 
+/// Convert kebab-case to camelCase for valid TypeScript identifiers.
+///
+/// Ensures namespace names are valid unquoted TypeScript object keys by
+/// converting hyphens to camelCase (e.g., `stream-async` → `streamAsync`).
+fn kebab_to_camel(s: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = false;
+    
+    for ch in s.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(ch.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
+}
+
 /// Extract namespace from path for contract grouping.
 ///
 /// Uses the second path segment when the first is "api", otherwise uses the first segment.
 /// This handles the common REST pattern of `/api/resource` paths.
+///
+/// For paths with hyphens (e.g., `/stream-async`), extracts the base word before the
+/// first hyphen to group related endpoints together (both `/stream` and `/stream-async`
+/// map to the `stream` namespace).
 ///
 /// # Examples
 ///
@@ -342,6 +524,8 @@ fn merge_path_and_query_schema(
 /// - `/api/v1/sessions` → `"v1"` (versioned APIs)
 /// - `/sessions` → `"sessions"` (no api prefix)
 /// - `/ping` → `""` (single segment = root namespace)
+/// - `/stream` → `"stream"`
+/// - `/stream-async` → `"stream"` (base word before hyphen)
 fn extract_namespace(path: &str) -> String {
     let segments: Vec<&str> = path
         .trim_start_matches('/')
@@ -349,14 +533,25 @@ fn extract_namespace(path: &str) -> String {
         .filter(|s| !s.is_empty() && !s.starts_with('{'))
         .collect();
 
-    match segments.as_slice() {
+    let namespace = match segments.as_slice() {
         // /api/resource/... → "resource"
         ["api", resource, ..] => resource.to_string(),
         // /resource/... → "resource"
         [resource, ..] if !resource.is_empty() => resource.to_string(),
         // / or empty → ""
         _ => String::new(),
+    };
+    
+    if namespace.is_empty() {
+        return namespace;
     }
+    
+    // Extract base word before first hyphen to group related endpoints
+    // e.g., "stream-async" → "stream"
+    let base = namespace.split('-').next().unwrap_or(&namespace);
+    
+    // Sanitize to valid TypeScript identifier (convert any remaining hyphens to camelCase)
+    kebab_to_camel(base)
 }
 
 /// `"list_planets"` → `"listPlanets"`
@@ -427,6 +622,21 @@ mod tests {
     }
 
     #[test]
+    fn namespace_sanitizes_hyphens_to_camel_case() {
+        // Both stream and stream-async map to "stream" namespace
+        assert_eq!(extract_namespace("/stream"), "stream");
+        assert_eq!(extract_namespace("/stream-async"), "stream");
+        assert_eq!(extract_namespace("/api/stream-async"), "stream");
+        
+        // user-profile maps to "user" (base word)
+        assert_eq!(extract_namespace("/api/user-profile"), "user");
+        assert_eq!(extract_namespace("/user-profile"), "user");
+        
+        // Complex hyphens: takes first word only
+        assert_eq!(extract_namespace("/my-complex-resource"), "my");
+    }
+
+    #[test]
     fn extract_single_path_param() {
         assert_eq!(extract_path_params("/planet/{id}"), vec!["id"]);
     }
@@ -468,7 +678,8 @@ mod tests {
 
         // Test with z.void() - happens when input type is ()
         // Not in schema registry, so path params should be the only input validation
-        let merged_void = merge_path_and_query_schema("/user/{id}/ping", "z.void()", "i32", &schemas);
+        let merged_void =
+            merge_path_and_query_schema("/user/{id}/ping", "z.void()", "i32", &schemas);
         assert_eq!(merged_void, "z.object({ id: z.number().int() })");
 
         // Test with z.record() - happens when input type is serde_json::Value
@@ -483,12 +694,14 @@ mod tests {
 
         // Test with primitive type - happens when input is just a String or i32
         // Not in schema registry, so path params should be the only input validation
-        let merged_primitive = merge_path_and_query_schema("/item/{id}", "z.string()", "i32", &schemas);
+        let merged_primitive =
+            merge_path_and_query_schema("/item/{id}", "z.string()", "i32", &schemas);
         assert_eq!(merged_primitive, "z.object({ id: z.number().int() })");
 
         // Test with unknown schema name that's not in registry
         // Should be treated as direct Zod expression and return path params only
-        let merged_unknown = merge_path_and_query_schema("/item/{id}", "UnknownSchema", "i32", &schemas);
+        let merged_unknown =
+            merge_path_and_query_schema("/item/{id}", "UnknownSchema", "i32", &schemas);
         assert_eq!(merged_unknown, "z.object({ id: z.number().int() })");
     }
 
@@ -502,12 +715,8 @@ mod tests {
             ts_schema_name: "UpdateUserBodySchema".to_string(),
         }];
 
-        let merged = merge_path_and_query_schema(
-            "/user/{id}",
-            "UpdateUserBodySchema",
-            "i32",
-            &schemas,
-        );
+        let merged =
+            merge_path_and_query_schema("/user/{id}", "UpdateUserBodySchema", "i32", &schemas);
 
         assert!(merged.contains("z.object({ id: z.number().int() })"));
         assert!(merged.contains(".extend(UpdateUserBodySchema.shape)"));
@@ -541,7 +750,7 @@ mod tests {
                 path_param_types: "",
             },
         ];
-        let output = generate_contract(&handlers, &[], &[], &std::collections::HashMap::new());
+        let output = generate_contract(&handlers, &[], &[], &HashMap::new());
         assert!(output.contains("listPlanets"));
         assert!(output.contains("ping"));
         assert!(output.contains("/planet/list"));
@@ -601,24 +810,159 @@ mod tests {
                 path_param_types: "",
             },
         ];
-        let output = generate_contract(&handlers, &[], &[], &std::collections::HashMap::new());
-        
+        let output = generate_contract(&handlers, &[], &[], &HashMap::new());
+
         // Should create separate namespaces
         assert!(output.contains("sessions: {"));
         assert!(output.contains("campaigns: {"));
-        
+
         // Should NOT have duplicate keys in flat api namespace
         assert!(!output.contains("api: {"));
-        
+
         // Both resources should have their own list/create handlers
         let sessions_idx = output.find("sessions: {").unwrap();
         let campaigns_idx = output.find("campaigns: {").unwrap();
-        
+
         // BTreeMap sorts alphabetically: campaigns < sessions
         assert!(campaigns_idx < sessions_idx);
-        
+
         // Verify both have list/create
         assert!(output.contains("list:"));
         assert!(output.contains("create:"));
+    }
+
+    #[test]
+    fn error_deduplication_single_error_set() {
+        use super::super::{ErrorInfo, ErrorVariantInfo};
+
+        let error_info = ErrorInfo {
+            type_name: "AppError",
+            variants: vec![
+                ErrorVariantInfo {
+                    name: "NOT_FOUND",
+                    data_schema: Some("z.string()"),
+                },
+                ErrorVariantInfo {
+                    name: "UNAUTHORIZED",
+                    data_schema: None,
+                },
+            ],
+        };
+
+        let handlers = vec![
+            HandlerInfo {
+                name: "create_session",
+                method: "POST",
+                path: "/api/sessions",
+                input_type_name: "CreateSessionInput",
+                query_type_name: None,
+                output_type_name: "Session",
+                module_path: "sessions",
+                error_type_name: Some("AppError"),
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+            HandlerInfo {
+                name: "update_session",
+                method: "PATCH",
+                path: "/api/sessions/{id}",
+                input_type_name: "UpdateSessionInput",
+                query_type_name: None,
+                output_type_name: "Session",
+                module_path: "sessions",
+                error_type_name: Some("AppError"),
+                stream_event_type_name: None,
+                path_param_types: "String",
+            },
+        ];
+
+        let output = generate_contract(&handlers, &[error_info], &[], &HashMap::new());
+
+        // Should have error constant section
+        assert!(output.contains("// Error Schemas"));
+        assert!(output.contains("const StandardApiErrors = {"));
+        assert!(output.contains("NOT_FOUND: {"));
+        assert!(output.contains("data: z.string()"));
+        assert!(output.contains("UNAUTHORIZED: {}"));
+        assert!(output.contains("} as const;"));
+
+        // Should reference constant instead of inline errors
+        assert!(output.contains(".errors(StandardApiErrors)"));
+
+        // Should NOT contain inline error definitions
+        assert!(!output.contains(".errors({\n"));
+    }
+
+    #[test]
+    fn error_deduplication_multiple_error_sets() {
+        use super::super::{ErrorInfo, ErrorVariantInfo};
+
+        let app_error = ErrorInfo {
+            type_name: "AppError",
+            variants: vec![
+                ErrorVariantInfo {
+                    name: "NOT_FOUND",
+                    data_schema: Some("z.string()"),
+                },
+                ErrorVariantInfo {
+                    name: "UNAUTHORIZED",
+                    data_schema: None,
+                },
+            ],
+        };
+
+        let auth_error = ErrorInfo {
+            type_name: "AuthError",
+            variants: vec![
+                ErrorVariantInfo {
+                    name: "INVALID_TOKEN",
+                    data_schema: Some("z.string()"),
+                },
+                ErrorVariantInfo {
+                    name: "EXPIRED_SESSION",
+                    data_schema: None,
+                },
+            ],
+        };
+
+        let handlers = vec![
+            HandlerInfo {
+                name: "create_session",
+                method: "POST",
+                path: "/api/sessions",
+                input_type_name: "CreateSessionInput",
+                query_type_name: None,
+                output_type_name: "Session",
+                module_path: "sessions",
+                error_type_name: Some("AppError"),
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+            HandlerInfo {
+                name: "login",
+                method: "POST",
+                path: "/api/auth/login",
+                input_type_name: "LoginInput",
+                query_type_name: None,
+                output_type_name: "Session",
+                module_path: "auth",
+                error_type_name: Some("AuthError"),
+                stream_event_type_name: None,
+                path_param_types: "",
+            },
+        ];
+
+        let output = generate_contract(&handlers, &[app_error, auth_error], &[], &HashMap::new());
+
+        // Should have two error constants
+        assert!(output.contains("const AppErrors = {"));
+        assert!(output.contains("const AuthErrors = {"));
+
+        // Should reference the correct constants
+        assert!(output.contains(".errors(AppErrors)"));
+        assert!(output.contains(".errors(AuthErrors)"));
+
+        // Should NOT use StandardApiErrors when there are multiple sets
+        assert!(!output.contains("StandardApiErrors"));
     }
 }
